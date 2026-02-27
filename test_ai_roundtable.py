@@ -28,7 +28,9 @@ from ai_roundtable import (
     sanitize_terminal_output,
     substitute_sentinels,
     strip_sentinels,
+    _is_within_root,
     _run_cli_streaming,
+    preflight_check,
     run_claude,
     run_codex,
     run_roundtable,
@@ -1131,6 +1133,99 @@ class TestRunCliStreaming(unittest.TestCase):
         block_event.set()  # unblock the thread
         self.assertFalse(result.ok)
         self.assertEqual(result.error_type, "timeout")
+
+
+class TestIsWithinRoot(unittest.TestCase):
+    """Tests for symlink traversal protection."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.tmpdir, "src"))
+        Path(os.path.join(self.tmpdir, "src", "main.py")).write_text("print('hi')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_normal_file_is_within_root(self):
+        root = Path(self.tmpdir)
+        target = root / "src" / "main.py"
+        self.assertTrue(_is_within_root(target, root))
+
+    def test_parent_escape_rejected(self):
+        root = Path(self.tmpdir)
+        target = root / ".." / "etc" / "passwd"
+        self.assertFalse(_is_within_root(target, root))
+
+    def test_symlink_escape_rejected(self):
+        """A symlink pointing outside the root should be rejected."""
+        root = Path(self.tmpdir)
+        link = root / "escape_link"
+        try:
+            link.symlink_to("/tmp")
+            self.assertFalse(_is_within_root(link, root))
+        except OSError:
+            self.skipTest("Cannot create symlinks on this platform")
+
+    def test_root_itself(self):
+        root = Path(self.tmpdir)
+        self.assertTrue(_is_within_root(root, root))
+
+
+class TestPreflightCheck(unittest.TestCase):
+    """Tests for CLI command preflight verification."""
+
+    @patch('ai_roundtable.shutil.which')
+    def test_preflight_raises_when_claude_missing(self, mock_which):
+        """Missing claude binary should raise RoundtableError."""
+        mock_which.side_effect = lambda x: None if x == CLAUDE_CMD else "/usr/bin/codex"
+        with self.assertRaises(RoundtableError) as ctx:
+            preflight_check()
+        self.assertIn("not found", str(ctx.exception).lower())
+
+    @patch('ai_roundtable.shutil.which')
+    def test_preflight_raises_when_codex_missing(self, mock_which):
+        """Missing codex binary should raise RoundtableError."""
+        mock_which.side_effect = lambda x: "/usr/bin/claude" if x == CLAUDE_CMD else None
+        with self.assertRaises(RoundtableError) as ctx:
+            preflight_check()
+        self.assertIn("not found", str(ctx.exception).lower())
+
+    @patch('ai_roundtable.shutil.which')
+    def test_preflight_succeeds_when_both_present(self, mock_which):
+        """Both commands present should not raise."""
+        mock_which.side_effect = lambda x: f"/usr/bin/{x}"
+        preflight_check()  # should not raise
+
+
+class TestC0Sanitization(unittest.TestCase):
+    """Tests for C0 control character sanitization."""
+
+    def test_strips_carriage_return(self):
+        text = "fake\rreal output"
+        result = sanitize_terminal_output(text)
+        self.assertNotIn("\r", result)
+        self.assertIn("real output", result)
+
+    def test_strips_backspace(self):
+        text = "password\b\b\b\b\b\b\b\bsafe text"
+        result = sanitize_terminal_output(text)
+        self.assertNotIn("\b", result)
+
+    def test_strips_del(self):
+        text = "text\x7f with delete"
+        result = sanitize_terminal_output(text)
+        self.assertNotIn("\x7f", result)
+
+    def test_preserves_newlines_and_tabs(self):
+        text = "line1\nline2\twith tab"
+        result = sanitize_terminal_output(text)
+        self.assertEqual(result, text)
+
+    def test_strips_null(self):
+        text = "null\x00byte"
+        result = sanitize_terminal_output(text)
+        self.assertNotIn("\x00", result)
 
 
 if __name__ == "__main__":

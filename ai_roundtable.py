@@ -12,6 +12,8 @@ Usage:
     python3 ai_roundtable.py /path/to/your/project --focus architecture
 """
 
+import queue
+import random
 import re
 import signal
 import subprocess
@@ -21,6 +23,8 @@ import os
 import argparse
 import textwrap
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 from datetime import datetime
@@ -146,9 +150,19 @@ _ANSI_RE = re.compile(
     r'|\x1b[^[\]P]'             # Other ESC sequences (e.g., \x1b=)
 )
 
+# C0 control characters to strip (except \n=0x0a and \t=0x09 which are safe formatting)
+_C0_RE = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+
 def sanitize_terminal_output(text: str) -> str:
-    """Strip ANSI/CSI/OSC escape sequences from agent output to prevent terminal injection."""
-    return _ANSI_RE.sub('', text)
+    """Strip ANSI/CSI/OSC escape sequences and C0 controls from agent output.
+
+    Preserves \\n (newlines) and \\t (tabs) for formatting. Strips all other
+    control characters including \\r (carriage return), \\b (backspace),
+    \\x7f (DEL), and other non-printables that could spoof terminal output.
+    """
+    text = _ANSI_RE.sub('', text)
+    text = _C0_RE.sub('', text)
+    return text
 
 def print_agent(name, color, message):
     """Pretty-print an agent's response."""
@@ -552,9 +566,6 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
     - Silent stalls: timeout is checked via queue.get(), not between lines
     - Cap-break deadlock: process is killed before joining threads
     """
-    import time
-    import threading
-    import queue
     proc = None
     try:
         proc = subprocess.Popen(
@@ -1012,7 +1023,6 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             output_dir = os.path.join(tempfile.gettempdir(), "ai_roundtable")
             os.makedirs(output_dir, exist_ok=True)
             print_warn(f"Cannot write to project directory. Saving to: {output_dir}")
-        import random
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=4))
         output_file = os.path.join(output_dir, f"roundtable_{timestamp}_{suffix}.md")
@@ -1031,9 +1041,8 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
 
     # Register SIGTERM handler for graceful shutdown in CI / process managers
     # Only register from the main thread (signal handlers can't be set from worker threads)
-    import threading as _threading
     _prev_sigterm = None
-    if _threading.current_thread() is _threading.main_thread():
+    if threading.current_thread() is threading.main_thread():
         _prev_sigterm = signal.getsignal(signal.SIGTERM)
         def _sigterm_handler(signum, frame):
             print(f"\n\n{Colors.WARN}SIGTERM received! Saving partial discussion log...{Colors.RESET}")
@@ -1097,16 +1106,15 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                 continue
 
             # Run the agent
-            import time as _time
             print(f"{Colors.DIM}Waiting for {agent_name}...{Colors.RESET}")
-            round_start = _time.monotonic()
+            round_start = time.monotonic()
 
             if agent == "claude":
                 result = run_claude(prompt, project_path, timeout)
             else:
                 result = run_codex(prompt, project_path, timeout)
 
-            elapsed = _time.monotonic() - round_start
+            elapsed = time.monotonic() - round_start
             elapsed_str = f"{elapsed:.1f}s"
             print(f"{Colors.DIM}  ({agent_name} responded in {elapsed_str}){Colors.RESET}")
 
