@@ -1,6 +1,6 @@
 [project]
 name = "ai-roundtable"
-version = "0.4.0"
+version = "0.5.0"
 description = "Multi-agent project review tool — Claude CLI and Codex CLI debate your code"
 readme = "ROUNDTABLE_README.md"
 license = {text = "MIT"}

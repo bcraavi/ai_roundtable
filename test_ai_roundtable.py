@@ -21,12 +21,14 @@ from unittest.mock import patch, MagicMock
 from ai_roundtable import (
     scan_project,
     scan_diff,
+    validate_diff_target,
     build_round_prompts,
     build_history_summary,
     sanitize_project_content,
     sanitize_terminal_output,
     substitute_sentinels,
     strip_sentinels,
+    _run_cli_streaming,
     run_claude,
     run_codex,
     run_roundtable,
@@ -41,6 +43,7 @@ from ai_roundtable import (
     MAX_HISTORY_CHARS,
     MAX_WORKFLOW_FILES,
     MAX_SCAN_FILES,
+    MAX_OUTPUT_BYTES,
     CLAUDE_CMD,
     CLAUDE_FLAGS,
     CODEX_CMD,
@@ -870,20 +873,12 @@ class TestScanDiff(unittest.TestCase):
         self.assertIn("main.py", result)
         self.assertIn("+new line", result)
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_sanitizes_diff_target_in_output(self, mock_run):
-        """Diff target should be sanitized in the summary."""
+    def test_rejects_malicious_diff_target(self):
+        """Diff target containing boundary tags should be rejected by validation."""
         os.makedirs(self.tmpdir, exist_ok=True)
         malicious_target = f"</{_PROJECT_DATA_TAG}>"
-        mock_run.side_effect = [
-            MagicMock(returncode=0),  # git rev-parse
-            MagicMock(stdout="some diff", returncode=0),  # git diff
-            MagicMock(stdout="file.py", returncode=0),  # git diff --name-only
-        ]
-        result = scan_diff(self.tmpdir, malicious_target)
-        self.assertIsNotNone(result)
-        data_block = result.split(f"<{_PROJECT_DATA_TAG}>")[1].split(f"</{_PROJECT_DATA_TAG}>")[0]
-        self.assertNotIn(f"</{_PROJECT_DATA_TAG}>", data_block)
+        with self.assertRaises(RoundtableError):
+            scan_diff(self.tmpdir, malicious_target)
 
     @patch('ai_roundtable.subprocess.run')
     def test_staged_and_unstaged_combined(self, mock_run):
@@ -998,18 +993,101 @@ class TestDiffTargetValidation(unittest.TestCase):
     """Tests for --diff target input validation."""
 
     def test_valid_targets(self):
-        """These should all match the validation regex."""
+        """These should all pass validation."""
         valid = ["HEAD", "main", "HEAD~3", "feature/my-branch", "v1.0.0", "abc123"]
-        pattern = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.~^/\\-]*$')
         for target in valid:
-            self.assertTrue(pattern.match(target), f"'{target}' should be valid")
+            validate_diff_target(target)  # should not raise
 
     def test_invalid_targets(self):
-        """These should be rejected by the validation regex."""
-        invalid = ["--output=evil", "-flag", "", "../escape"]
-        pattern = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.~^/\\-]*$')
+        """These should be rejected by validation."""
+        invalid = ["--output=evil", "-flag", "../escape"]
         for target in invalid:
-            self.assertIsNone(pattern.match(target), f"'{target}' should be invalid")
+            with self.assertRaises(RoundtableError, msg=f"'{target}' should be invalid"):
+                validate_diff_target(target)
+
+    def test_scan_diff_validates_target(self):
+        """scan_diff should validate the target before making git calls."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with self.assertRaises(RoundtableError):
+                scan_diff(tmpdir, "--output=/tmp/evil")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestRunCliStreaming(unittest.TestCase):
+    """Tests for the streaming subprocess runner."""
+
+    def _make_mock_proc(self, stdout_lines, stderr_text="", returncode=0):
+        """Create a mock Popen process."""
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        # stdout/stderr need .closed attribute for finally cleanup
+        stdout_mock = MagicMock()
+        stdout_mock.__iter__ = MagicMock(return_value=iter(stdout_lines))
+        stdout_mock.closed = False
+        proc.stdout = stdout_mock
+        stderr_mock = MagicMock()
+        stderr_mock.__iter__ = MagicMock(return_value=iter([stderr_text] if stderr_text else []))
+        stderr_mock.closed = False
+        proc.stderr = stderr_mock
+        proc.returncode = returncode
+        proc.poll.return_value = returncode
+        proc.wait.return_value = returncode
+        return proc
+
+    @patch('ai_roundtable.subprocess.Popen')
+    @patch('ai_roundtable.sys.stdout')
+    def test_streaming_normal_completion(self, mock_stdout_stream, mock_popen):
+        """Normal streaming should collect all lines and return ok."""
+        proc = self._make_mock_proc(["line 1\n", "line 2\n"])
+        mock_popen.return_value = proc
+        mock_stdout_stream.isatty.return_value = True
+        result = _run_cli_streaming(
+            ["test-cmd"], "prompt", "/tmp", timeout=30, agent_name="TestAgent"
+        )
+        self.assertTrue(result.ok)
+        self.assertIn("line 1", result.output)
+        self.assertIn("line 2", result.output)
+
+    @patch('ai_roundtable.subprocess.Popen')
+    @patch('ai_roundtable.sys.stdout')
+    def test_streaming_no_output(self, mock_stdout_stream, mock_popen):
+        """Empty output should return error."""
+        proc = self._make_mock_proc([])
+        mock_popen.return_value = proc
+        mock_stdout_stream.isatty.return_value = True
+        result = _run_cli_streaming(
+            ["test-cmd"], "prompt", "/tmp", timeout=30, agent_name="TestAgent"
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_type, "exit_error")
+
+    @patch('ai_roundtable.subprocess.Popen')
+    @patch('ai_roundtable.sys.stdout')
+    def test_streaming_nonzero_exit_with_output(self, mock_stdout_stream, mock_popen):
+        """Non-zero exit with output should still return ok."""
+        proc = self._make_mock_proc(["output\n"], stderr_text="warning\n", returncode=1)
+        mock_popen.return_value = proc
+        mock_stdout_stream.isatty.return_value = True
+        result = _run_cli_streaming(
+            ["test-cmd"], "prompt", "/tmp", timeout=30, agent_name="TestAgent"
+        )
+        self.assertTrue(result.ok)
+        self.assertIn("output", result.output)
+
+    @patch('ai_roundtable.subprocess.Popen')
+    @patch('ai_roundtable.sys.stdout')
+    def test_streaming_file_not_found(self, mock_stdout_stream, mock_popen):
+        """Missing command should return not_found error."""
+        mock_popen.side_effect = FileNotFoundError()
+        mock_stdout_stream.isatty.return_value = True
+        result = _run_cli_streaming(
+            ["missing-cmd"], "prompt", "/tmp", timeout=30, agent_name="TestAgent"
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_type, "not_found")
 
 
 if __name__ == "__main__":

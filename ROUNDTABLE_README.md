@@ -95,7 +95,7 @@ CODEX_FLAGS = ["--skip-git-repo-check"]  # Codex flags
 python3 -m unittest test_ai_roundtable -v
 ```
 
-82 tests cover the core logic: project scanning (including source file ingestion and binary file filtering), prompt building, history truncation, sentinel replacement, boundary sanitization, terminal output sanitization, structured runner results, orchestrator integration (normal flow, error recovery, failure threading, dry-run), and scan early termination.
+99 tests cover the core logic: project scanning (including source file ingestion and binary file filtering), prompt building, history truncation, sentinel replacement, boundary sanitization, terminal output sanitization, structured runner results, CLI streaming path, diff-mode scanning (including git error paths), orchestrator integration (normal flow, error recovery, failure threading, dry-run, diff mode), diff target validation, log sanitization, and scan early termination.
 
 ## Tips
 

@@ -105,16 +105,22 @@ class RunnerResult:
 # COLORS FOR TERMINAL OUTPUT
 # ============================================================
 class Colors:
-    CLAUDE = "\033[38;5;208m"   # Orange for Claude
-    CODEX = "\033[38;5;40m"     # Green for Codex
-    YOU = "\033[38;5;75m"       # Blue for You
-    HEADER = "\033[1;97m"       # Bold white
-    DIM = "\033[2m"             # Dim
-    WARN = "\033[38;5;214m"     # Yellow for warnings
-    ERROR = "\033[38;5;196m"    # Red for errors
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    SEPARATOR = "\033[38;5;240m"
+    # Respect NO_COLOR convention (https://no-color.org/) and non-TTY output
+    _enabled = (
+        "NO_COLOR" not in os.environ
+        and hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
+    CLAUDE = "\033[38;5;208m" if _enabled else ""   # Orange for Claude
+    CODEX = "\033[38;5;40m" if _enabled else ""      # Green for Codex
+    YOU = "\033[38;5;75m" if _enabled else ""         # Blue for You
+    HEADER = "\033[1;97m" if _enabled else ""         # Bold white
+    DIM = "\033[2m" if _enabled else ""               # Dim
+    WARN = "\033[38;5;214m" if _enabled else ""       # Yellow for warnings
+    ERROR = "\033[38;5;196m" if _enabled else ""      # Red for errors
+    RESET = "\033[0m" if _enabled else ""
+    BOLD = "\033[1m" if _enabled else ""
+    SEPARATOR = "\033[38;5;240m" if _enabled else ""
 
 def print_banner():
     banner = f"""
@@ -321,6 +327,13 @@ def scan_project(project_path: str) -> str:
         if not _is_within_root(sf_path, path):
             continue
         try:
+            # Skip oversized files (check size before reading)
+            try:
+                file_size = sf_path.stat().st_size
+            except OSError:
+                continue
+            if file_size > MAX_SOURCE_FILE_CHARS * 4:
+                continue  # Skip very large files entirely
             # Skip binary files (null byte check on first 512 bytes)
             with open(sf_path, 'rb') as bf:
                 head = bf.read(512)
@@ -371,6 +384,18 @@ def scan_project(project_path: str) -> str:
 
 # ============================================================
 # DIFF-AWARE SCANNING
+# Regex for validating git diff targets (branches, tags, HEAD~N, etc.)
+# Rejects flag-like inputs (starting with -) to prevent git option injection.
+_DIFF_TARGET_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.~^/\\-]*$')
+
+def validate_diff_target(target: str) -> None:
+    """Validate a git diff target string. Raises RoundtableError if invalid."""
+    if not _DIFF_TARGET_RE.match(target):
+        raise RoundtableError(
+            f"Invalid diff target: '{target}'. "
+            "Must be a branch name, tag, or HEAD~N (cannot start with '-')."
+        )
+
 # ============================================================
 def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
     """Generate a diff-focused project summary for review.
@@ -382,6 +407,8 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
 
     Returns a formatted diff summary wrapped in boundary tags, or None if no diff found.
     """
+    validate_diff_target(diff_target)
+
     path = Path(project_path)
     if not path.exists() or not path.is_dir():
         raise RoundtableError(f"Project path '{project_path}' does not exist or is not a directory.")
@@ -513,8 +540,13 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
 
 def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: int,
                        agent_name: str, env: Optional[dict] = None) -> RunnerResult:
-    """Streaming variant: reads stdout line-by-line and prints as received."""
+    """Streaming variant: reads stdout line-by-line and prints as received.
+
+    Uses a background thread to drain stderr concurrently, preventing pipe
+    deadlocks when the child writes to both stdout and stderr.
+    """
     import time
+    import threading
     proc = None
     try:
         proc = subprocess.Popen(
@@ -529,6 +561,19 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
         # Send prompt and close stdin
         proc.stdin.write(prompt)
         proc.stdin.close()
+
+        # Drain stderr in a background thread to prevent pipe deadlock
+        stderr_chunks: List[str] = []
+        def _drain_stderr():
+            try:
+                for chunk in proc.stderr:
+                    stderr_chunks.append(chunk)
+                    if sum(len(c) for c in stderr_chunks) > MAX_OUTPUT_BYTES:
+                        break
+            except (OSError, ValueError):
+                pass
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
 
         lines = []
         total_bytes = 0
@@ -553,13 +598,23 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
         if capped:
             print_warn(f"{agent_name} output exceeded {MAX_OUTPUT_BYTES} bytes — truncated.")
 
+        # Kill process before joining stderr thread to prevent deadlock
+        if capped or timed_out:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except OSError:
+                pass
+
         if timed_out:
+            stderr_thread.join(timeout=2)
             return RunnerResult(ok=False, output=f"{agent_name} CLI timed out — try increasing --timeout",
                                 exit_code=None, error_type="timeout")
 
-        stderr = (proc.stderr.read() or "")[:MAX_OUTPUT_BYTES]
-        proc.wait(timeout=10)
+        stderr_thread.join(timeout=10)
+        stderr = "".join(stderr_chunks)
 
+        proc.wait(timeout=10)
         stdout = "".join(lines).strip()
         returncode = proc.returncode or 0
 
@@ -1087,7 +1142,7 @@ def main():
     parser.add_argument("--diff", type=str, nargs="?", const="HEAD", default=None,
                         metavar="TARGET",
                         help="Review only changed files (diff mode). TARGET can be HEAD (default), a branch name, or HEAD~N.")
-    parser.add_argument("--version", action="version", version="%(prog)s 0.4.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.5.0")
 
     args = parser.parse_args()
 
@@ -1097,9 +1152,12 @@ def main():
         sys.exit(1)
 
     # Validate diff target (reject flag-like or malformed refs)
-    if args.diff is not None and not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.~^/\\-]*$', args.diff):
-        print_error(f"Invalid --diff target: '{args.diff}'. Must be a branch name, tag, or HEAD~N.")
-        sys.exit(1)
+    if args.diff is not None:
+        try:
+            validate_diff_target(args.diff)
+        except RoundtableError as e:
+            print_error(str(e))
+            sys.exit(1)
 
     # Enforce minimum rounds
     num_rounds = max(2, args.rounds)
