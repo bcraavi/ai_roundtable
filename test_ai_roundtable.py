@@ -373,60 +373,70 @@ class TestRoundLabels(unittest.TestCase):
 
 
 class TestCLIRunners(unittest.TestCase):
-    """Integration tests for CLI runners with mocked subprocess."""
+    """Integration tests for CLI runners with mocked subprocess (Popen-based)."""
 
-    def _mock_result(self, stdout="Agent response", stderr="", returncode=0):
-        result = MagicMock()
-        result.stdout = stdout
-        result.stderr = stderr
-        result.returncode = returncode
-        return result
+    def _mock_popen_proc(self, stdout="Agent response", stderr="", returncode=0):
+        """Create a mock Popen process with readable stdout/stderr for bounded drain."""
+        proc = MagicMock()
+        proc.stdin = MagicMock()
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_run_claude_command_structure(self, mock_run):
+        stdout_mock = MagicMock()
+        stdout_mock.read.side_effect = [stdout, ""] if stdout else [""]
+        stdout_mock.closed = False
+        proc.stdout = stdout_mock
+
+        stderr_mock = MagicMock()
+        stderr_mock.read.side_effect = [stderr, ""] if stderr else [""]
+        stderr_mock.closed = False
+        proc.stderr = stderr_mock
+
+        proc.returncode = returncode
+        proc.poll.return_value = returncode
+        proc.wait.return_value = returncode
+        return proc
+
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_run_claude_command_structure(self, mock_popen):
         """Verify Claude CLI is invoked with correct command and stdin."""
-        mock_run.return_value = self._mock_result(stdout="Claude says hi")
+        mock_popen.return_value = self._mock_popen_proc(stdout="Claude says hi")
         result = run_claude("test prompt", "/tmp/project", timeout=60)
 
-        mock_run.assert_called_once()
-        call_kwargs = mock_run.call_args
-        cmd = call_kwargs[1].get('args') or call_kwargs[0][0]
+        mock_popen.assert_called_once()
+        call_args = mock_popen.call_args
+        cmd = call_args[0][0]
         self.assertEqual(cmd, [CLAUDE_CMD] + CLAUDE_FLAGS + ["-"])
-        self.assertEqual(call_kwargs[1]['input'], "test prompt")
-        self.assertEqual(call_kwargs[1]['timeout'], 60)
         self.assertIsInstance(result, RunnerResult)
         self.assertTrue(result.ok)
         self.assertEqual(result.output, "Claude says hi")
         self.assertIsNone(result.error_type)
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_run_codex_command_structure(self, mock_run):
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_run_codex_command_structure(self, mock_popen):
         """Verify Codex CLI is invoked with correct command and stdin."""
-        mock_run.return_value = self._mock_result(stdout="Codex says hi")
+        mock_popen.return_value = self._mock_popen_proc(stdout="Codex says hi")
         result = run_codex("test prompt", "/tmp/project", timeout=90)
 
-        mock_run.assert_called_once()
-        call_kwargs = mock_run.call_args
-        cmd = call_kwargs[1].get('args') or call_kwargs[0][0]
+        mock_popen.assert_called_once()
+        call_args = mock_popen.call_args
+        cmd = call_args[0][0]
         self.assertEqual(cmd, [CODEX_CMD, "exec"] + CODEX_FLAGS + ["-"])
-        self.assertEqual(call_kwargs[1]['input'], "test prompt")
         self.assertTrue(result.ok)
         self.assertEqual(result.output, "Codex says hi")
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_run_claude_nonzero_exit_with_output(self, mock_run):
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_run_claude_nonzero_exit_with_output(self, mock_popen):
         """Non-zero exit with stdout should warn but return output as ok."""
-        mock_run.return_value = self._mock_result(
+        mock_popen.return_value = self._mock_popen_proc(
             stdout="Partial output", stderr="some warning", returncode=1
         )
         result = run_claude("prompt", "/tmp/project")
         self.assertTrue(result.ok)
         self.assertEqual(result.output, "Partial output")
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_run_claude_nonzero_exit_no_output(self, mock_run):
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_run_claude_nonzero_exit_no_output(self, mock_popen):
         """Non-zero exit without stdout should return structured error."""
-        mock_run.return_value = self._mock_result(
+        mock_popen.return_value = self._mock_popen_proc(
             stdout="", stderr="fatal error", returncode=1
         )
         result = run_claude("prompt", "/tmp/project")
@@ -435,52 +445,65 @@ class TestCLIRunners(unittest.TestCase):
         self.assertIn("fatal error", result.output)
         self.assertEqual(result.exit_code, 1)
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_run_codex_timeout(self, mock_run):
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_run_codex_timeout(self, mock_popen):
         """Timeout should return structured timeout error."""
         import subprocess
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=120)
+        proc = self._mock_popen_proc()
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=120)
+        proc.poll.return_value = None  # process still running
+        mock_popen.return_value = proc
         result = run_codex("prompt", "/tmp/project")
         self.assertFalse(result.ok)
         self.assertEqual(result.error_type, "timeout")
         self.assertIn("timed out", result.output)
         self.assertIsNone(result.exit_code)
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_run_claude_not_found(self, mock_run):
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_run_claude_not_found(self, mock_popen):
         """Missing binary should return structured not_found error."""
-        mock_run.side_effect = FileNotFoundError()
+        mock_popen.side_effect = FileNotFoundError()
         result = run_claude("prompt", "/tmp/project")
         self.assertFalse(result.ok)
         self.assertEqual(result.error_type, "not_found")
         self.assertIn("not found", result.output)
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_run_claude_strips_claudecode_env(self, mock_run):
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_run_claude_strips_claudecode_env(self, mock_popen):
         """CLAUDECODE should be removed from env to allow nesting."""
-        mock_run.return_value = self._mock_result()
+        mock_popen.return_value = self._mock_popen_proc()
         with patch.dict(os.environ, {"CLAUDECODE": "1"}):
             run_claude("prompt", "/tmp/project")
-        call_kwargs = mock_run.call_args
-        env = call_kwargs[1]['env']
+        call_kwargs = mock_popen.call_args[1]
+        env = call_kwargs.get('env')
+        self.assertIsNotNone(env)
         self.assertNotIn("CLAUDECODE", env)
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_run_codex_no_env_mutation(self, mock_run):
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_run_codex_no_env_mutation(self, mock_popen):
         """Codex runner should not pass custom env (uses system default)."""
-        mock_run.return_value = self._mock_result()
+        mock_popen.return_value = self._mock_popen_proc()
         run_codex("prompt", "/tmp/project")
-        call_kwargs = mock_run.call_args
-        self.assertIsNone(call_kwargs[1].get('env'))
+        call_kwargs = mock_popen.call_args[1]
+        self.assertIsNone(call_kwargs.get('env'))
 
-    @patch('ai_roundtable.subprocess.run')
-    def test_runner_result_exception(self, mock_run):
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_runner_result_exception(self, mock_popen):
         """Generic exception should return structured error."""
-        mock_run.side_effect = OSError("pipe broken")
+        mock_popen.side_effect = OSError("pipe broken")
         result = run_claude("prompt", "/tmp/project")
         self.assertFalse(result.ok)
         self.assertEqual(result.error_type, "exception")
         self.assertIn("pipe broken", result.output)
+
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_nonstream_output_bounded(self, mock_popen):
+        """Non-stream Popen path should enforce MAX_OUTPUT_BYTES during read."""
+        huge_output = "x" * (MAX_OUTPUT_BYTES + 10000)
+        mock_popen.return_value = self._mock_popen_proc(stdout=huge_output)
+        result = run_claude("prompt", "/tmp/project")
+        self.assertTrue(result.ok)
+        self.assertLessEqual(len(result.output), MAX_OUTPUT_BYTES)
 
 
 class TestSaveLog(unittest.TestCase):
@@ -803,7 +826,7 @@ class TestOrchestratorIntegration(unittest.TestCase):
             self._ok_result("Claude round 3 sees failure context"),
         ]
         mock_codex.side_effect = [
-            self._err_result("Connection refused", "timeout"),
+            self._err_result("Connection refused", "exit_error"),
             self._ok_result("Codex round 4"),
         ]
         output = os.path.join(self.tmpdir, "test_output.md")
@@ -825,6 +848,46 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertTrue(os.path.isdir(rt_dir))
         files = os.listdir(rt_dir)
         self.assertTrue(any(f.startswith("roundtable_") for f in files))
+
+    @patch('ai_roundtable.time.sleep')
+    @patch('ai_roundtable.run_codex')
+    @patch('ai_roundtable.run_claude')
+    @patch('ai_roundtable.preflight_check')
+    def test_retry_on_timeout(self, mock_preflight, mock_claude, mock_codex, mock_sleep):
+        """Agent timeout should trigger a single retry with backoff."""
+        timeout_result = self._err_result("timed out", "timeout")
+        timeout_result.exit_code = None
+        ok_result = self._ok_result("Claude review after retry")
+        # First call times out, retry succeeds
+        mock_claude.side_effect = [timeout_result, ok_result]
+        mock_codex.return_value = self._ok_result("Codex review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+        self.assertIn("Claude review after retry", result)
+        # Claude called twice: first attempt + retry
+        self.assertEqual(mock_claude.call_count, 2)
+        # Backoff sleep was called
+        mock_sleep.assert_called_once_with(5)
+
+    @patch('ai_roundtable.time.sleep')
+    @patch('ai_roundtable.run_codex')
+    @patch('ai_roundtable.run_claude')
+    @patch('ai_roundtable.preflight_check')
+    def test_no_retry_on_exit_error(self, mock_preflight, mock_claude, mock_codex, mock_sleep):
+        """Exit errors should NOT trigger retry (only timeout/exception do)."""
+        mock_claude.side_effect = [
+            self._ok_result("Claude round 1"),
+            self._ok_result("Claude round 3"),
+        ]
+        mock_codex.side_effect = [
+            self._err_result("Codex crashed", "exit_error"),
+            self._ok_result("Codex round 4"),
+        ]
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=4, interactive=False, output_file=output)
+        # Codex called twice (round 2 + round 4), no retry
+        self.assertEqual(mock_codex.call_count, 2)
+        mock_sleep.assert_not_called()
 
 
 class TestWorkflowFileCap(unittest.TestCase):

@@ -33,7 +33,7 @@ from pathlib import Path
 # ============================================================
 # VERSION (single source of truth)
 # ============================================================
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # ============================================================
 # CONFIGURATION — Adjust CLI commands if needed
@@ -542,33 +542,91 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
     try:
         if stream and sys.stdout.isatty():
             return _run_cli_streaming(cmd, prompt, project_path, timeout, agent_name, env)
-        result = subprocess.run(
+        # Non-streaming: bounded Popen reads (prevents OOM from runaway output)
+        proc = subprocess.Popen(
             cmd,
-            input=prompt,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             cwd=project_path,
-            env=env
+            env=env,
         )
-        stderr = result.stderr.strip()[:MAX_OUTPUT_BYTES]
-        stdout = result.stdout.strip()[:MAX_OUTPUT_BYTES]
-        if result.returncode != 0:
+        try:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except OSError:
+            pass
+
+        # Drain stdout/stderr concurrently with hard byte cap
+        stdout_chunks: List[str] = []
+        stderr_chunks: List[str] = []
+
+        def _drain_bounded(stream, chunks):
+            total = 0
+            try:
+                while True:
+                    data = stream.read(4096)
+                    if not data:
+                        break
+                    remaining = MAX_OUTPUT_BYTES - total
+                    if remaining <= 0:
+                        break
+                    if len(data) > remaining:
+                        chunks.append(data[:remaining])
+                        break
+                    chunks.append(data)
+                    total += len(data)
+            except (OSError, ValueError):
+                pass
+
+        out_t = threading.Thread(target=_drain_bounded, args=(proc.stdout, stdout_chunks), daemon=True)
+        err_t = threading.Thread(target=_drain_bounded, args=(proc.stderr, stderr_chunks), daemon=True)
+        out_t.start()
+        err_t.start()
+
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+
+        out_t.join(timeout=2 if timed_out else 10)
+        err_t.join(timeout=2 if timed_out else 10)
+
+        # Cleanup pipes
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe and not pipe.closed:
+                    pipe.close()
+            except OSError:
+                pass
+
+        if timed_out:
+            return RunnerResult(ok=False, output=f"{agent_name} CLI timed out — try increasing --timeout",
+                                exit_code=None, error_type="timeout")
+
+        stdout = "".join(stdout_chunks).strip()
+        stderr = "".join(stderr_chunks).strip()
+
+        if proc.returncode != 0:
             if stderr:
-                print_warn(f"{agent_name} CLI exited with code {result.returncode}: {stderr[:200]}")
+                print_warn(f"{agent_name} CLI exited with code {proc.returncode}: {stderr[:200]}")
             if not stdout:
                 return RunnerResult(
-                    ok=False, output=f"{agent_name} exited with code {result.returncode}: {stderr or 'No output'}",
-                    exit_code=result.returncode, error_type="exit_error"
+                    ok=False, output=f"{agent_name} exited with code {proc.returncode}: {stderr or 'No output'}",
+                    exit_code=proc.returncode, error_type="exit_error"
                 )
-            print_warn(f"{agent_name} CLI exited with code {result.returncode} but produced output; using it.")
+            print_warn(f"{agent_name} CLI exited with code {proc.returncode} but produced output; using it.")
         if not stdout:
             return RunnerResult(ok=False, output=f"No response from {agent_name}",
-                                exit_code=result.returncode, error_type="exit_error")
-        return RunnerResult(ok=True, output=stdout, exit_code=result.returncode, error_type=None)
-    except subprocess.TimeoutExpired:
-        return RunnerResult(ok=False, output=f"{agent_name} CLI timed out — try increasing --timeout",
-                            exit_code=None, error_type="timeout")
+                                exit_code=proc.returncode, error_type="exit_error")
+        return RunnerResult(ok=True, output=stdout, exit_code=proc.returncode, error_type=None)
     except FileNotFoundError:
         return RunnerResult(ok=False, output=f"'{cmd[0]}' not found. Is {agent_name} CLI installed and in PATH?",
                             exit_code=None, error_type="not_found")
@@ -1130,16 +1188,27 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                 log.append(f"Prompt length: {len(prompt)} chars\n")
                 continue
 
-            # Run the agent
+            # Run the agent (with single retry for transient failures)
             print(f"{Colors.DIM}Waiting for {agent_name}...{Colors.RESET}")
             round_start = time.monotonic()
 
-            if agent == "claude":
-                result = run_claude(prompt, project_path, timeout,
-                                    cmd_path=config.claude_cmd if config else None)
-            else:
-                result = run_codex(prompt, project_path, timeout,
-                                   cmd_path=config.codex_cmd if config else None)
+            def _call_agent(t):
+                if agent == "claude":
+                    return run_claude(prompt, project_path, t,
+                                      cmd_path=config.claude_cmd if config else None)
+                else:
+                    return run_codex(prompt, project_path, t,
+                                     cmd_path=config.codex_cmd if config else None)
+
+            result = _call_agent(timeout)
+
+            # Retry once for transient failures (timeout, exception)
+            if not result.ok and result.error_type in ("timeout", "exception"):
+                retry_timeout = min(timeout * 2, 600)
+                backoff = 5
+                print_warn(f"{agent_name} failed ({result.error_type}). Retrying in {backoff}s with {retry_timeout}s timeout...")
+                time.sleep(backoff)
+                result = _call_agent(retry_timeout)
 
             elapsed = time.monotonic() - round_start
             elapsed_str = f"{elapsed:.1f}s"
