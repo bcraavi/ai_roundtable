@@ -36,6 +36,7 @@ from ai_roundtable import (
     run_roundtable,
     save_log,
     Round,
+    RuntimeConfig,
     RunnerResult,
     RoundtableError,
     _PREV_RESPONSE,
@@ -1192,10 +1193,13 @@ class TestPreflightCheck(unittest.TestCase):
         self.assertIn("not found", str(ctx.exception).lower())
 
     @patch('ai_roundtable.shutil.which')
-    def test_preflight_succeeds_when_both_present(self, mock_which):
-        """Both commands present should not raise."""
+    def test_preflight_returns_runtime_config(self, mock_which):
+        """Both commands present should return RuntimeConfig with absolute paths."""
         mock_which.side_effect = lambda x: f"/usr/bin/{x}"
-        preflight_check()  # should not raise
+        config = preflight_check()
+        self.assertIsInstance(config, RuntimeConfig)
+        self.assertEqual(config.claude_cmd, f"/usr/bin/{CLAUDE_CMD}")
+        self.assertEqual(config.codex_cmd, f"/usr/bin/{CODEX_CMD}")
 
 
 class TestC0Sanitization(unittest.TestCase):

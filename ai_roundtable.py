@@ -103,6 +103,12 @@ class RoundtableError(Exception):
     pass
 
 @dataclass
+class RuntimeConfig:
+    """Resolved CLI paths from preflight check. Immutable after creation."""
+    claude_cmd: str   # Absolute path to Claude CLI binary
+    codex_cmd: str    # Absolute path to Codex CLI binary
+
+@dataclass
 class RunnerResult:
     """Structured result from a CLI agent invocation."""
     ok: bool                      # True if the agent produced usable output
@@ -185,9 +191,9 @@ def preflight_check():
     """Verify required CLI tools are installed before starting.
 
     Resolves CLI commands to absolute paths for security (prevents PATH hijacking)
-    and raises RoundtableError if required tools are missing.
+    and returns a RuntimeConfig with the resolved paths.
+    Raises RoundtableError if required tools are missing.
     """
-    global CLAUDE_CMD, CODEX_CMD  # noqa: PLW0603
     missing = []
     claude_path = shutil.which(CLAUDE_CMD)
     codex_path = shutil.which(CODEX_CMD)
@@ -198,9 +204,7 @@ def preflight_check():
     if missing:
         msg = "Required CLI tools not found on PATH: " + ", ".join(missing)
         raise RoundtableError(msg)
-    # Pin to absolute paths to prevent PATH hijacking after preflight
-    CLAUDE_CMD = claude_path
-    CODEX_CMD = codex_path
+    return RuntimeConfig(claude_cmd=claude_path, codex_cmd=codex_path)
 
 # ============================================================
 # SINGLE-PASS SENTINEL SUBSTITUTION
@@ -697,9 +701,11 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
             except Exception:
                 pass
 
-def run_claude(prompt: str, project_path: str, timeout: int = 120) -> RunnerResult:
+def run_claude(prompt: str, project_path: str, timeout: int = 120,
+               cmd_path: Optional[str] = None) -> RunnerResult:
     """Run Claude CLI with prompt via stdin and return a structured result."""
-    cmd = [CLAUDE_CMD] + CLAUDE_FLAGS + ["-"]
+    claude = cmd_path or CLAUDE_CMD
+    cmd = [claude] + CLAUDE_FLAGS + ["-"]
     env = os.environ.copy()
     # CLAUDECODE is set by Claude Code when running inside a session.
     # Removing it allows nested claude CLI invocations (e.g., when this
@@ -707,13 +713,15 @@ def run_claude(prompt: str, project_path: str, timeout: int = 120) -> RunnerResu
     env.pop("CLAUDECODE", None)
     return _run_cli(cmd, prompt, project_path, timeout, "Claude", env=env, stream=True)
 
-def run_codex(prompt: str, project_path: str, timeout: int = 120) -> RunnerResult:
+def run_codex(prompt: str, project_path: str, timeout: int = 120,
+              cmd_path: Optional[str] = None) -> RunnerResult:
     """Run Codex CLI with prompt via stdin and return a structured result.
 
     Codex exec accepts '-' as the prompt argument to read from stdin,
     which avoids ARG_MAX limits on large prompts.
     """
-    cmd = [CODEX_CMD, CODEX_SUBCMD] + CODEX_FLAGS + ["-"]
+    codex = cmd_path or CODEX_CMD
+    cmd = [codex, CODEX_SUBCMD] + CODEX_FLAGS + ["-"]
     return _run_cli(cmd, prompt, project_path, timeout, "Codex", stream=True)
 
 # ============================================================
@@ -1005,8 +1013,9 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
         print(f"{Colors.DIM}Found project files. Starting discussion...{Colors.RESET}")
 
     # Preflight: verify CLI tools are available (skip in dry-run mode)
+    config = None
     if not dry_run:
-        preflight_check()
+        config = preflight_check()
 
     print_separator()
 
@@ -1110,9 +1119,11 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             round_start = time.monotonic()
 
             if agent == "claude":
-                result = run_claude(prompt, project_path, timeout)
+                result = run_claude(prompt, project_path, timeout,
+                                    cmd_path=config.claude_cmd if config else None)
             else:
-                result = run_codex(prompt, project_path, timeout)
+                result = run_codex(prompt, project_path, timeout,
+                                   cmd_path=config.codex_cmd if config else None)
 
             elapsed = time.monotonic() - round_start
             elapsed_str = f"{elapsed:.1f}s"
