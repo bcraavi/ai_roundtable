@@ -135,7 +135,7 @@ def print_separator():
     print(f"{Colors.SEPARATOR}{'─' * 64}{Colors.RESET}")
 
 _ANSI_RE = re.compile(
-    r'\x1b\[[0-9;]*[A-Za-z]'    # CSI sequences (e.g., \x1b[31m)
+    r'\x1b\[[\x20-\x3f]*[\x40-\x7e]'  # Full ECMA-48 CSI: private modes (?25l), intermediates
     r'|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)'  # OSC sequences (BEL or ST terminated)
     r'|\x1bP[^\x1b]*\x1b\\'     # DCS sequences
     r'|\x1b[^[\]P]'             # Other ESC sequences (e.g., \x1b=)
@@ -334,12 +334,11 @@ def scan_project(project_path: str) -> str:
                 continue
             if file_size > MAX_SOURCE_FILE_CHARS * 4:
                 continue  # Skip very large files entirely
-            # Skip binary files (null byte check on first 512 bytes)
-            with open(sf_path, 'rb') as bf:
-                head = bf.read(512)
-                if b'\x00' in head:
-                    continue
-            content = sf_path.read_text(encoding='utf-8', errors='replace')
+            # Single-read: binary check + text decode in one operation
+            raw = sf_path.read_bytes()
+            if b'\x00' in raw[:8192]:
+                continue  # Binary file (null byte in first 8KB)
+            content = raw.decode('utf-8', errors='replace')
             if len(content) > MAX_SOURCE_FILE_CHARS:
                 content = content[:MAX_SOURCE_FILE_CHARS] + "\n... (truncated)"
             if source_chars_used + len(content) > MAX_SOURCE_CHARS:
@@ -542,11 +541,15 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
                        agent_name: str, env: Optional[dict] = None) -> RunnerResult:
     """Streaming variant: reads stdout line-by-line and prints as received.
 
-    Uses a background thread to drain stderr concurrently, preventing pipe
-    deadlocks when the child writes to both stdout and stderr.
+    Uses background threads for both stdout and stderr draining, with a
+    queue-based reader for stdout. This prevents:
+    - Pipe deadlock: stderr and stdout are drained concurrently
+    - Silent stalls: timeout is checked via queue.get(), not between lines
+    - Cap-break deadlock: process is killed before joining threads
     """
     import time
     import threading
+    import queue
     proc = None
     try:
         proc = subprocess.Popen(
@@ -562,6 +565,19 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
         proc.stdin.write(prompt)
         proc.stdin.close()
 
+        # Queue-based stdout reader thread — enables deadline-aware timeout
+        stdout_queue = queue.Queue()
+        _SENTINEL = None  # marks end-of-stream
+
+        def _drain_stdout():
+            try:
+                for line in proc.stdout:
+                    stdout_queue.put(line)
+            except (OSError, ValueError):
+                pass
+            finally:
+                stdout_queue.put(_SENTINEL)
+
         # Drain stderr in a background thread to prevent pipe deadlock
         stderr_chunks: List[str] = []
         def _drain_stderr():
@@ -572,16 +588,30 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
                         break
             except (OSError, ValueError):
                 pass
+
+        stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stdout_thread.start()
         stderr_thread.start()
 
         lines = []
         total_bytes = 0
-        start = time.monotonic()
+        deadline = time.monotonic() + timeout
         capped = False
         timed_out = False
 
-        for line in proc.stdout:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                line = stdout_queue.get(timeout=min(remaining, 1.0))
+            except queue.Empty:
+                continue  # re-check deadline
+            if line is _SENTINEL:
+                break  # stdout exhausted
+
             total_bytes += len(line)
             if total_bytes > MAX_OUTPUT_BYTES:
                 capped = True
@@ -591,14 +621,11 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
             safe_line = sanitize_terminal_output(line)
             sys.stdout.write(f"{Colors.DIM}  {safe_line}{Colors.RESET}")
             sys.stdout.flush()
-            if time.monotonic() - start > timeout:
-                timed_out = True
-                break
 
         if capped:
             print_warn(f"{agent_name} output exceeded {MAX_OUTPUT_BYTES} bytes — truncated.")
 
-        # Kill process before joining stderr thread to prevent deadlock
+        # Kill process before joining threads to prevent deadlock on cap/timeout
         if capped or timed_out:
             try:
                 if proc.poll() is None:
@@ -607,10 +634,12 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
                 pass
 
         if timed_out:
+            stdout_thread.join(timeout=2)
             stderr_thread.join(timeout=2)
             return RunnerResult(ok=False, output=f"{agent_name} CLI timed out — try increasing --timeout",
                                 exit_code=None, error_type="timeout")
 
+        stdout_thread.join(timeout=10)
         stderr_thread.join(timeout=10)
         stderr = "".join(stderr_chunks)
 
@@ -993,12 +1022,16 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     conversation_history: List[dict] = []
 
     # Register SIGTERM handler for graceful shutdown in CI / process managers
-    _prev_sigterm = signal.getsignal(signal.SIGTERM)
-    def _sigterm_handler(signum, frame):
-        print(f"\n\n{Colors.WARN}SIGTERM received! Saving partial discussion log...{Colors.RESET}")
-        save_log(log, output_file, project_path, is_partial=True)
-        sys.exit(143)  # 128 + 15 (SIGTERM)
-    signal.signal(signal.SIGTERM, _sigterm_handler)
+    # Only register from the main thread (signal handlers can't be set from worker threads)
+    import threading as _threading
+    _prev_sigterm = None
+    if _threading.current_thread() is _threading.main_thread():
+        _prev_sigterm = signal.getsignal(signal.SIGTERM)
+        def _sigterm_handler(signum, frame):
+            print(f"\n\n{Colors.WARN}SIGTERM received! Saving partial discussion log...{Colors.RESET}")
+            save_log(log, output_file, project_path, is_partial=True)
+            sys.exit(143)  # 128 + 15 (SIGTERM)
+        signal.signal(signal.SIGTERM, _sigterm_handler)
 
     try:
         for i, round_info in enumerate(rounds):
@@ -1102,7 +1135,8 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
         return "\n".join(log)
 
     finally:
-        signal.signal(signal.SIGTERM, _prev_sigterm)
+        if _prev_sigterm is not None:
+            signal.signal(signal.SIGTERM, _prev_sigterm)
 
     # Save full discussion log
     log_content = save_log(log, output_file, project_path)

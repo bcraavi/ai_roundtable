@@ -533,6 +533,27 @@ class TestSanitizeTerminalOutput(unittest.TestCase):
         self.assertIn("safe text", result)
         self.assertNotIn("malicious", result)
 
+    def test_strips_private_mode_csi(self):
+        """Private mode CSI sequences like ?25l (hide cursor) should be stripped."""
+        text = "\x1b[?25lhidden cursor\x1b[?25h"
+        result = sanitize_terminal_output(text)
+        self.assertNotIn("\x1b", result)
+        self.assertIn("hidden cursor", result)
+
+    def test_strips_bracketed_paste(self):
+        """Bracketed paste mode escape should be stripped."""
+        text = "\x1b[?2004h pasted\x1b[?2004l"
+        result = sanitize_terminal_output(text)
+        self.assertNotIn("\x1b", result)
+        self.assertIn("pasted", result)
+
+    def test_strips_alternate_screen(self):
+        """Alternate screen buffer escape should be stripped."""
+        text = "\x1b[?1049h screen\x1b[?1049l"
+        result = sanitize_terminal_output(text)
+        self.assertNotIn("\x1b", result)
+        self.assertIn("screen", result)
+
 
 class TestSubstituteSentinels(unittest.TestCase):
     """Tests for single-pass sentinel substitution."""
@@ -1020,10 +1041,10 @@ class TestRunCliStreaming(unittest.TestCase):
     """Tests for the streaming subprocess runner."""
 
     def _make_mock_proc(self, stdout_lines, stderr_text="", returncode=0):
-        """Create a mock Popen process."""
+        """Create a mock Popen process with iterable stdout/stderr pipes."""
         proc = MagicMock()
         proc.stdin = MagicMock()
-        # stdout/stderr need .closed attribute for finally cleanup
+        # stdout/stderr need __iter__ for the thread-based draining and .closed for cleanup
         stdout_mock = MagicMock()
         stdout_mock.__iter__ = MagicMock(return_value=iter(stdout_lines))
         stdout_mock.closed = False
@@ -1088,6 +1109,28 @@ class TestRunCliStreaming(unittest.TestCase):
         )
         self.assertFalse(result.ok)
         self.assertEqual(result.error_type, "not_found")
+
+    @patch('ai_roundtable.subprocess.Popen')
+    @patch('ai_roundtable.sys.stdout')
+    def test_streaming_timeout(self, mock_stdout_stream, mock_popen):
+        """Timeout should kill process and return timeout error."""
+        import time
+        import threading
+        # Simulate a process that hangs: stdout iterator blocks
+        block_event = threading.Event()
+        def slow_iter():
+            yield "first line\n"
+            block_event.wait(timeout=5)  # simulate hang
+        proc = self._make_mock_proc([])  # placeholder
+        proc.stdout.__iter__ = MagicMock(return_value=slow_iter())
+        mock_popen.return_value = proc
+        mock_stdout_stream.isatty.return_value = True
+        result = _run_cli_streaming(
+            ["test-cmd"], "prompt", "/tmp", timeout=1, agent_name="TestAgent"
+        )
+        block_event.set()  # unblock the thread
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_type, "timeout")
 
 
 if __name__ == "__main__":
