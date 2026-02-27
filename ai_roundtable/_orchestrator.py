@@ -206,7 +206,7 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                 failure_msg = f"[AGENT FAILED: {result.error_type} — {result.output[:200]}]"
                 print_error(f"{agent_name} failed this round: {result.output}")
                 log.append(f"## {label} ({elapsed_str})")
-                log.append(f"**[AGENT ERROR]** {result.output}\n")
+                log.append(f"**[AGENT ERROR]** {sanitize_terminal_output(result.output)}\n")
                 # Update previous_response so the next round's __PREV_RESPONSE__ reflects the failure
                 previous_response = failure_msg
                 conversation_history.append({

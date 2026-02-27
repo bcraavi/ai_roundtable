@@ -6,40 +6,42 @@ Have Claude CLI and Codex CLI review your project together in a structured debat
 
 - **Claude CLI** installed and authenticated (`claude` command works)
 - **Codex CLI** installed and authenticated (`codex` command works)
-- **Python 3.8+**
+- **Python 3.9+**
 
 Both tools are verified at startup — the script will fail fast with a clear message if either is missing.
 
 ## Quick Start
 
 ```bash
-# Basic usage — full comprehensive review
-python3 ai_roundtable.py /path/to/your/project
-
-# Focus on architecture only
-python3 ai_roundtable.py /path/to/your/project --focus architecture
-
-# More rounds for deeper discussion
-python3 ai_roundtable.py /path/to/your/project --rounds 6
-
-# Fewer rounds for a quick back-and-forth
-python3 ai_roundtable.py /path/to/your/project --rounds 2
-
-# Non-interactive mode (no pauses for your input)
-python3 ai_roundtable.py /path/to/your/project --no-interactive
-
-# Longer timeout for large projects
-python3 ai_roundtable.py /path/to/your/project --timeout 180
-
-# Save output to a specific file
-python3 ai_roundtable.py /path/to/your/project --output review.md
-
-# Dry run — see generated prompts without calling any CLIs
-python3 ai_roundtable.py /path/to/your/project --dry-run
-
 # Install as a CLI tool
 pip install .
+
+# Basic usage — full comprehensive review
 ai-roundtable /path/to/your/project
+
+# Focus on architecture only
+ai-roundtable /path/to/your/project --focus architecture
+
+# More rounds for deeper discussion
+ai-roundtable /path/to/your/project --rounds 6
+
+# Fewer rounds for a quick back-and-forth
+ai-roundtable /path/to/your/project --rounds 2
+
+# Non-interactive mode (no pauses for your input)
+ai-roundtable /path/to/your/project --no-interactive
+
+# Longer timeout for large projects
+ai-roundtable /path/to/your/project --timeout 180
+
+# Save output to a specific file
+ai-roundtable /path/to/your/project --output review.md
+
+# Dry run — see generated prompts without calling any CLIs
+ai-roundtable /path/to/your/project --dry-run
+
+# Or run as a module without installing
+python3 -m ai_roundtable /path/to/your/project
 ```
 
 ## How It Works
@@ -87,15 +89,15 @@ export ROUNDTABLE_CLAUDE_CMD="/path/to/claude"
 export ROUNDTABLE_CODEX_CMD="/path/to/codex"
 ```
 
-Alternatively, edit the constants at the top of `ai_roundtable.py`.
+Alternatively, edit the constants in `ai_roundtable/_constants.py`.
 
 ## Running Tests
 
 ```bash
-python3 -m unittest test_ai_roundtable -v
+python3 -m unittest discover -s tests -v
 ```
 
-120+ tests cover the core logic: project scanning (source file ingestion, binary filtering, symlink protection), prompt building, history truncation, sentinel replacement, boundary sanitization, terminal output sanitization (ANSI/CSI/C0 controls), structured runner results (bounded Popen reads, kill-on-cap, retry/backoff), CLI streaming path (queue-based timeout, process cleanup), diff-mode scanning (git error paths, target validation, file list capping), orchestrator integration (normal flow, error recovery, failure threading, retry, dry-run, diff mode), security tests (_is_within_root, preflight_check), log sanitization, and scan early termination.
+140+ tests across 13 per-module test files cover: project scanning (source file ingestion, binary filtering, symlink protection), prompt building, history truncation, sentinel replacement, boundary sanitization, terminal output sanitization (ANSI/CSI/C0 controls), structured runner results (bounded Popen reads, kill-on-cap, retry/backoff), CLI streaming path (queue-based timeout, process cleanup), diff-mode scanning (git error paths, target validation, file list capping), orchestrator integration (normal flow, error recovery, failure threading, retry, dry-run, diff mode), security tests (_is_within_root, preflight_check), log sanitization, scan early termination, and web context (tech stack detection, version lookup, search instructions).
 
 ## Tips
 
