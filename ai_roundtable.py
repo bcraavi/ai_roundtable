@@ -107,7 +107,7 @@ class RoundtableError(Exception):
     """Raised for recoverable errors in roundtable operations."""
     pass
 
-@dataclass
+@dataclass(frozen=True)
 class RuntimeConfig:
     """Resolved CLI paths from preflight check. Immutable after creation."""
     claude_cmd: str   # Absolute path to Claude CLI binary
@@ -726,7 +726,8 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
             finally:
                 stdout_queue.put(_SENTINEL)
 
-        # Drain stderr in a background thread to prevent pipe deadlock
+        # Drain stderr in a background thread to prevent pipe deadlock.
+        # Kill process on cap to prevent stall from blocked pipe writes.
         stderr_chunks: List[str] = []
         def _drain_stderr():
             stderr_total = 0
@@ -735,6 +736,11 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
                     stderr_chunks.append(chunk)
                     stderr_total += len(chunk)
                     if stderr_total > MAX_OUTPUT_CHARS:
+                        try:
+                            if proc.poll() is None:
+                                proc.kill()
+                        except OSError:
+                            pass
                         break
             except (OSError, ValueError):
                 pass
@@ -1130,6 +1136,11 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                    dry_run: bool = False, diff_target: Optional[str] = None):
     """Run the full multi-agent roundtable discussion."""
     Colors._resolve()
+
+    # Auto-disable interactive mode when stdin is not a TTY (CI, pipes)
+    if interactive and not (hasattr(sys.stdin, "isatty") and sys.stdin.isatty()):
+        interactive = False
+
     print_banner()
 
     # Scan project first (diff mode can exit early without needing CLI tools)
@@ -1234,6 +1245,9 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                 if user_input:
                     safe_input = sanitize_project_content(strip_sentinels(user_input))
                     prompt += f"\n\nADDITIONAL DIRECTION FROM THE DEVELOPER:\n{safe_input}"
+                    # Re-enforce budget after user input append
+                    if len(prompt) > MAX_PROMPT_CHARS:
+                        prompt = prompt[:MAX_PROMPT_CHARS] + "\n... (prompt trimmed to fit context budget)"
                     log.append(f"## Developer Input (before {label})")
                     log.append(f"{safe_input}\n")
                     conversation_history.append({

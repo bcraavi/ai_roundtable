@@ -264,9 +264,11 @@ class TestBuildRoundPrompts(unittest.TestCase):
         rounds = build_round_prompts(summary, "all", 4)
         template = rounds[1].prompt_template
 
-        # This would crash with .format() — should work with .replace()
-        result = template.replace(_PREV_RESPONSE, "Claude's {review} with braces")
-        result = result.replace(_CONVERSATION_HISTORY, "some {history}")
+        # Use the actual substitute_sentinels function (not raw .replace())
+        result = substitute_sentinels(template, {
+            _PREV_RESPONSE: "Claude's {review} with braces",
+            _CONVERSATION_HISTORY: "some {history}",
+        })
         self.assertIn("Claude's {review} with braces", result)
         self.assertIn("some {history}", result)
 
