@@ -167,17 +167,21 @@ class TestCLIRunners(unittest.TestCase):
 class TestRunCliStreaming(unittest.TestCase):
     """Tests for the streaming subprocess runner."""
 
-    def _make_mock_proc(self, stdout_lines, stderr_text="", returncode=0):
-        """Create a mock Popen process with iterable stdout/stderr pipes."""
+    def _make_mock_proc(self, stdout_chunks, stderr_text="", returncode=0):
+        """Create a mock Popen process with readable stdout/stderr pipes.
+
+        stdout_chunks: list of strings returned by successive read(4096) calls.
+        The last call returns '' to signal EOF.
+        """
         proc = MagicMock()
         proc.stdin = MagicMock()
-        # stdout/stderr need __iter__ for the thread-based draining and .closed for cleanup
+        # stdout/stderr use .read(N) for chunk-based draining
         stdout_mock = MagicMock()
-        stdout_mock.__iter__ = MagicMock(return_value=iter(stdout_lines))
+        stdout_mock.read.side_effect = list(stdout_chunks) + [""]
         stdout_mock.closed = False
         proc.stdout = stdout_mock
         stderr_mock = MagicMock()
-        stderr_mock.__iter__ = MagicMock(return_value=iter([stderr_text] if stderr_text else []))
+        stderr_mock.read.side_effect = ([stderr_text] + [""]) if stderr_text else [""]
         stderr_mock.closed = False
         proc.stderr = stderr_mock
         proc.returncode = returncode
@@ -188,8 +192,8 @@ class TestRunCliStreaming(unittest.TestCase):
     @patch('ai_roundtable._runners.subprocess.Popen')
     @patch('ai_roundtable._runners.sys.stdout')
     def test_streaming_normal_completion(self, mock_stdout_stream, mock_popen):
-        """Normal streaming should collect all lines and return ok."""
-        proc = self._make_mock_proc(["line 1\n", "line 2\n"])
+        """Normal streaming should collect all chunks and return ok."""
+        proc = self._make_mock_proc(["line 1\nline 2\n"])
         mock_popen.return_value = proc
         mock_stdout_stream.isatty.return_value = True
         result = _run_cli_streaming(
@@ -241,13 +245,16 @@ class TestRunCliStreaming(unittest.TestCase):
     @patch('ai_roundtable._runners.sys.stdout')
     def test_streaming_timeout(self, mock_stdout_stream, mock_popen):
         """Timeout should kill process and return timeout error."""
-        # Simulate a process that hangs: stdout iterator blocks
+        # Simulate a process that hangs: stdout.read() blocks
         block_event = threading.Event()
-        def slow_iter():
-            yield "first line\n"
+        def slow_read(n):
+            if not hasattr(slow_read, '_called'):
+                slow_read._called = True
+                return "first chunk\n"
             block_event.wait(timeout=5)  # simulate hang
+            return ""
         proc = self._make_mock_proc([])  # placeholder
-        proc.stdout.__iter__ = MagicMock(return_value=slow_iter())
+        proc.stdout.read = slow_read
         mock_popen.return_value = proc
         mock_stdout_stream.isatty.return_value = True
         result = _run_cli_streaming(

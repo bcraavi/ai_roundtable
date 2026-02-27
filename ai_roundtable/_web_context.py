@@ -10,6 +10,7 @@ Always-active web search integration that enriches every round prompt with:
 import json
 import re
 import threading
+import time
 import urllib.request
 import urllib.error
 from datetime import date
@@ -116,9 +117,12 @@ def _fetch_versions(tech_stack: List[str]) -> Dict[str, str]:
         t.start()
         threads.append(t)
 
-    # Join with global deadline — don't wait forever for stragglers
+    # Join with shared monotonic deadline — total wall-clock is bounded
+    # regardless of how many packages are fetched.
+    deadline = time.monotonic() + _FETCH_DEADLINE
     for t in threads:
-        t.join(timeout=_FETCH_DEADLINE)
+        remaining = max(0, deadline - time.monotonic())
+        t.join(timeout=remaining)
 
     return versions
 
@@ -151,7 +155,7 @@ def get_web_search_instruction(agent: str) -> str:
         )
 
 
-def build_web_context(project_summary: str) -> str:
+def build_web_context(project_summary: str, offline: bool = False) -> str:
     """Build a complete web context block for prompt injection.
 
     Combines:
@@ -159,10 +163,12 @@ def build_web_context(project_summary: str) -> str:
     2. Today's date for knowledge cutoff awareness
 
     Agent-specific search instructions are added per-round by the orchestrator.
+
+    When offline=True, skips network version fetches (used for --dry-run).
     """
     today = date.today().isoformat()
     tech_stack = detect_tech_stack(project_summary)
-    versions = _fetch_versions(tech_stack)
+    versions = {} if offline else _fetch_versions(tech_stack)
 
     parts = [f"CURRENT TECH CONTEXT (as of {today}):"]
 

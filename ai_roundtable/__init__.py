@@ -33,6 +33,11 @@ from ._constants import (
     MAX_OUTPUT_CHARS,
     MAX_PROMPT_CHARS,
     MAX_WORKFLOW_FILES,
+)
+
+# Private constants — imported for backward compatibility and test access
+# but excluded from __all__ to avoid public API surface creep.
+from ._constants import (  # noqa: F811
     _PREV_RESPONSE,
     _CONVERSATION_HISTORY,
     _SENTINELS,
@@ -55,10 +60,12 @@ from ._protocols import (
 from ._sanitize import (
     sanitize_terminal_output,
     sanitize_project_content,
-    _is_within_root,
     substitute_sentinels,
     strip_sentinels,
 )
+
+# Private sanitize functions — available for test imports but not in __all__
+from ._sanitize import _is_within_root  # noqa: F811
 
 from ._colors import (
     Colors,
@@ -79,11 +86,12 @@ from ._diff import (
 )
 
 from ._runners import (
-    _run_cli,
-    _run_cli_streaming,
     run_claude,
     run_codex,
 )
+
+# Private runner functions — available for test imports but not in __all__
+from ._runners import _run_cli, _run_cli_streaming  # noqa: F811
 
 from ._history import build_history_summary
 
@@ -107,7 +115,7 @@ from ._orchestrator import run_roundtable
 from ._cli import main
 
 __all__ = [
-    # Constants
+    # Constants (public)
     "__version__",
     "CLAUDE_CMD", "CODEX_CMD", "CODEX_SUBCMD",
     "CLAUDE_FLAGS", "CODEX_FLAGS",
@@ -115,14 +123,13 @@ __all__ = [
     "MAX_CONFIG_FILE_CHARS", "MAX_SOURCE_CHARS", "MAX_SOURCE_FILE_CHARS",
     "MAX_RESPONSE_CHARS", "MAX_OUTPUT_CHARS", "MAX_PROMPT_CHARS",
     "MAX_WORKFLOW_FILES",
-    "_PREV_RESPONSE", "_CONVERSATION_HISTORY", "_SENTINELS", "_PROJECT_DATA_TAG",
     # Types
     "RoundtableError", "RuntimeConfig", "RunnerResult", "Round",
     # Protocols
     "AgentRunner", "ProjectScanner", "WebContextProvider",
-    # Sanitize
+    # Sanitize (public)
     "sanitize_terminal_output", "sanitize_project_content",
-    "_is_within_root", "substitute_sentinels", "strip_sentinels",
+    "substitute_sentinels", "strip_sentinels",
     # Colors
     "Colors", "print_banner", "print_separator", "print_agent",
     "print_warn", "print_error",
@@ -132,8 +139,8 @@ __all__ = [
     "scan_project",
     # Diff
     "validate_diff_target", "scan_diff",
-    # Runners
-    "_run_cli", "_run_cli_streaming", "run_claude", "run_codex",
+    # Runners (public)
+    "run_claude", "run_codex",
     # History
     "build_history_summary",
     # Prompts

@@ -63,7 +63,8 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     print_separator()
 
     # Build web context (always active — enriches prompts with current tech info)
-    web_context = build_web_context(project_summary)
+    # Skip network fetches in dry-run mode to avoid unexpected outbound calls
+    web_context = build_web_context(project_summary, offline=dry_run)
 
     # Build prompts (web context is baked into each round's prompt)
     rounds = build_round_prompts(project_summary, focus, num_rounds, web_context=web_context)
@@ -75,9 +76,14 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
         try:
             os.makedirs(output_dir, exist_ok=True)
         except OSError:
-            output_dir = os.path.join(tempfile.gettempdir(), "ai_roundtable")
-            os.makedirs(output_dir, exist_ok=True)
-            print_warn(f"Cannot write to project directory. Saving to: {output_dir}")
+            try:
+                output_dir = os.path.join(tempfile.gettempdir(), "ai_roundtable")
+                os.makedirs(output_dir, exist_ok=True)
+                print_warn(f"Cannot write to project directory. Saving to: {output_dir}")
+            except OSError:
+                # Last resort: use tempfile.mkdtemp which finds a writable location
+                output_dir = tempfile.mkdtemp(prefix="ai_roundtable_")
+                print_warn(f"Cannot write to temp directory. Saving to: {output_dir}")
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=4))
         output_file = os.path.join(output_dir, f"roundtable_{timestamp}_{suffix}.md")

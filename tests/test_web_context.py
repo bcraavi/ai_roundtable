@@ -113,6 +113,18 @@ class TestBuildWebContext(unittest.TestCase):
             context = build_web_context("empty project")
         self.assertIn("No specific tech stack detected", context)
 
+    @patch('ai_roundtable._web_context._fetch_latest_version')
+    def test_offline_skips_network_fetches(self, mock_fetch):
+        """offline=True should skip version fetches entirely."""
+        summary = "FILE TREE:\n  manage.py\n  requirements.txt\n  main.py"
+        context = build_web_context(summary, offline=True)
+        mock_fetch.assert_not_called()
+        # Should still detect tech stack
+        self.assertIn("Django", context)
+        self.assertIn("Python", context)
+        # Should NOT have version info
+        self.assertNotIn("Latest stable versions", context)
+
 
 class TestVersionChecks(unittest.TestCase):
     """Tests for _VERSION_CHECKS correctness."""
@@ -164,6 +176,23 @@ class TestFetchVersionsParallel(unittest.TestCase):
         mock_fetch.side_effect = _selective
         versions = _fetch_versions(["React", "Django"])
         self.assertEqual(versions, {"react": "19.0.0"})
+
+    @patch('ai_roundtable._web_context._FETCH_DEADLINE', 2)
+    @patch('ai_roundtable._web_context._fetch_latest_version')
+    def test_global_deadline_bounds_wall_time(self, mock_fetch):
+        """Total wall time should be bounded by _FETCH_DEADLINE, not N * deadline."""
+        import time as _time
+
+        def _slow_fetch(package, registry):
+            _time.sleep(5)  # Each worker sleeps 5s (way over the 2s deadline)
+            return "1.0.0"
+
+        mock_fetch.side_effect = _slow_fetch
+        start = _time.monotonic()
+        versions = _fetch_versions(["React", "Django", "Flask"])
+        elapsed = _time.monotonic() - start
+        # Should complete in ~2s (deadline), not 15s (3 × 5s serial)
+        self.assertLess(elapsed, 5.0)
 
 
 class TestFetchLatestVersion(unittest.TestCase):

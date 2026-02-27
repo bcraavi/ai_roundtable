@@ -161,26 +161,35 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
         proc.stdin.write(prompt)
         proc.stdin.close()
 
-        # Queue-based stdout reader thread — enables deadline-aware timeout
+        # Queue-based stdout reader thread — enables deadline-aware timeout.
+        # Uses chunk-based reads (read(4096)) instead of line iteration to
+        # prevent deadlock when a process emits long output without newlines.
         stdout_queue = queue.Queue()
         _SENTINEL = None  # marks end-of-stream
 
         def _drain_stdout():
             try:
-                for line in proc.stdout:
-                    stdout_queue.put(line)
+                while True:
+                    chunk = proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    stdout_queue.put(chunk)
             except (OSError, ValueError):
                 pass
             finally:
                 stdout_queue.put(_SENTINEL)
 
         # Drain stderr in a background thread to prevent pipe deadlock.
+        # Uses chunk-based reads matching stdout for consistency.
         # Kill process on cap to prevent stall from blocked pipe writes.
         stderr_chunks: List[str] = []
         def _drain_stderr():
             stderr_total = 0
             try:
-                for chunk in proc.stderr:
+                while True:
+                    chunk = proc.stderr.read(4096)
+                    if not chunk:
+                        break
                     stderr_chunks.append(chunk)
                     stderr_total += len(chunk)
                     if stderr_total > MAX_OUTPUT_CHARS:
@@ -198,8 +207,8 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
         stdout_thread.start()
         stderr_thread.start()
 
-        lines = []
-        total_bytes = 0
+        chunks = []
+        total_chars = 0
         deadline = time.monotonic() + timeout
         capped = False
         timed_out = False
@@ -210,20 +219,20 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
                 timed_out = True
                 break
             try:
-                line = stdout_queue.get(timeout=min(remaining, 1.0))
+                chunk = stdout_queue.get(timeout=min(remaining, 1.0))
             except queue.Empty:
                 continue  # re-check deadline
-            if line is _SENTINEL:
+            if chunk is _SENTINEL:
                 break  # stdout exhausted
 
-            total_bytes += len(line)
-            if total_bytes > MAX_OUTPUT_CHARS:
+            total_chars += len(chunk)
+            if total_chars > MAX_OUTPUT_CHARS:
                 capped = True
                 break
-            lines.append(line)
-            # Print sanitized streaming line (prevents terminal injection)
-            safe_line = sanitize_terminal_output(line)
-            sys.stdout.write(f"{Colors.DIM}  {safe_line}{Colors.RESET}")
+            chunks.append(chunk)
+            # Print sanitized streaming chunk (prevents terminal injection)
+            safe_chunk = sanitize_terminal_output(chunk)
+            sys.stdout.write(f"{Colors.DIM}  {safe_chunk}{Colors.RESET}")
             sys.stdout.flush()
 
         if capped:
@@ -248,7 +257,7 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
         stderr = "".join(stderr_chunks)
 
         proc.wait(timeout=10)
-        stdout = "".join(lines).strip()
+        stdout = "".join(chunks).strip()
         returncode = proc.returncode or 0
 
         if returncode != 0:

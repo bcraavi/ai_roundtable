@@ -91,6 +91,18 @@ class TestOrchestratorIntegration(unittest.TestCase):
                        output_file=output, dry_run=True)
         mock_preflight.assert_not_called()
 
+    @patch('ai_roundtable._orchestrator.build_web_context')
+    @patch('ai_roundtable._orchestrator.preflight_check')
+    def test_dry_run_skips_network_fetches(self, mock_preflight, mock_web_context):
+        """Dry run should call build_web_context with offline=True."""
+        mock_web_context.return_value = "CURRENT TECH CONTEXT"
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
+                       output_file=output, dry_run=True)
+        mock_web_context.assert_called_once()
+        _, kwargs = mock_web_context.call_args
+        self.assertTrue(kwargs.get('offline', False))
+
     @patch('ai_roundtable._orchestrator.run_codex')
     @patch('ai_roundtable._orchestrator.run_claude')
     @patch('ai_roundtable._orchestrator.preflight_check')

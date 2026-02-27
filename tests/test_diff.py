@@ -122,6 +122,30 @@ class TestScanDiff(unittest.TestCase):
         self.assertLessEqual(len(file_lines), MAX_FILE_LIST)
 
 
+    @patch('ai_roundtable._diff.subprocess.run')
+    def test_changed_files_deterministic_and_no_empties(self, mock_run):
+        """Changed file list should be sorted (deterministic) and contain no empty strings."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        # Simulate files with trailing newlines that produce empty strings in split
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # git rev-parse
+            MagicMock(stdout="diff content", returncode=0),  # git diff
+            MagicMock(stdout="", returncode=0),  # git diff --cached
+            MagicMock(stdout="z_file.py\na_file.py\n\nm_file.py\n", returncode=0),  # git diff --name-only
+            MagicMock(stdout="a_file.py\n", returncode=0),  # git diff --cached --name-only (duplicate)
+            MagicMock(stdout="", returncode=0),  # git ls-files --others
+        ]
+        result = scan_diff(self.tmpdir, "HEAD")
+        # Extract CHANGED FILES section
+        lines = result.split('\n')
+        file_lines = [l.strip() for l in lines if l.startswith('  ') and l.strip().endswith('.py')]
+        # Should be sorted and contain no empty strings
+        self.assertEqual(file_lines, sorted(file_lines))
+        self.assertNotIn("", file_lines)
+        # Duplicates should be removed
+        self.assertEqual(len(file_lines), len(set(file_lines)))
+
+
 class TestDiffTargetValidation(unittest.TestCase):
     """Tests for --diff target input validation."""
 

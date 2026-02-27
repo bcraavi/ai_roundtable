@@ -105,7 +105,7 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
             if unstaged_names.returncode != 0 or staged_names.returncode != 0:
                 print_warn("git diff --name-only returned non-zero; file list may be incomplete.")
             all_names = (unstaged_names.stdout.strip() + "\n" + staged_names.stdout.strip()).strip()
-            changed_files = list(set(all_names.split('\n'))) if all_names else []
+            changed_files = sorted(f for f in set(all_names.split('\n')) if f) if all_names else []
         else:
             names_result = subprocess.run(
                 ["git", "diff", "--name-only", diff_target],
