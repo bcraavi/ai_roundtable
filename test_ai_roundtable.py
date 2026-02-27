@@ -19,6 +19,7 @@ from unittest.mock import patch, MagicMock
 # Import the module under test
 from ai_roundtable import (
     scan_project,
+    scan_diff,
     build_round_prompts,
     build_history_summary,
     sanitize_project_content,
@@ -821,6 +822,124 @@ class TestWorkflowFileCap(unittest.TestCase):
         config_section = summary.split("KEY CONFIG FILES:")[1]
         content_blocks = config_section.count("--- .github/workflows/wf_")
         self.assertLessEqual(content_blocks, MAX_WORKFLOW_FILES)
+
+
+class TestScanDiff(unittest.TestCase):
+    """Tests for diff-mode project scanning."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_rejects_nonexistent_path(self):
+        with self.assertRaises(RoundtableError):
+            scan_diff("/nonexistent/path/does/not/exist")
+
+    @patch('ai_roundtable.subprocess.run')
+    def test_returns_none_when_no_diff(self, mock_run):
+        """No changes should return None."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        # git rev-parse succeeds
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # git rev-parse
+            MagicMock(stdout="", returncode=0),  # git diff HEAD
+            MagicMock(stdout="", returncode=0),  # git diff --cached
+        ]
+        result = scan_diff(self.tmpdir, "HEAD")
+        self.assertIsNone(result)
+
+    @patch('ai_roundtable.subprocess.run')
+    def test_returns_summary_with_diff(self, mock_run):
+        """When there are changes, should return a formatted diff summary."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # git rev-parse
+            MagicMock(stdout="diff --git a/main.py b/main.py\n+new line", returncode=0),  # git diff HEAD
+            MagicMock(stdout="", returncode=0),  # git diff --cached
+            MagicMock(stdout="main.py", returncode=0),  # git diff --name-only
+            MagicMock(stdout="", returncode=0),  # git diff --cached --name-only
+        ]
+        result = scan_diff(self.tmpdir, "HEAD")
+        self.assertIsNotNone(result)
+        self.assertIn(f"<{_PROJECT_DATA_TAG}>", result)
+        self.assertIn("REVIEW MODE: Diff review", result)
+        self.assertIn("main.py", result)
+        self.assertIn("+new line", result)
+
+    @patch('ai_roundtable.subprocess.run')
+    def test_sanitizes_diff_target_in_output(self, mock_run):
+        """Diff target should be sanitized in the summary."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        malicious_target = f"</{_PROJECT_DATA_TAG}>"
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # git rev-parse
+            MagicMock(stdout="some diff", returncode=0),  # git diff
+            MagicMock(stdout="file.py", returncode=0),  # git diff --name-only
+        ]
+        result = scan_diff(self.tmpdir, malicious_target)
+        self.assertIsNotNone(result)
+        data_block = result.split(f"<{_PROJECT_DATA_TAG}>")[1].split(f"</{_PROJECT_DATA_TAG}>")[0]
+        self.assertNotIn(f"</{_PROJECT_DATA_TAG}>", data_block)
+
+    @patch('ai_roundtable.subprocess.run')
+    def test_staged_and_unstaged_combined(self, mock_run):
+        """When diffing HEAD, staged and unstaged changes should be combined."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # git rev-parse
+            MagicMock(stdout="unstaged changes", returncode=0),  # git diff HEAD
+            MagicMock(stdout="staged changes", returncode=0),  # git diff --cached
+            MagicMock(stdout="file_a.py", returncode=0),  # git diff --name-only HEAD
+            MagicMock(stdout="file_b.py", returncode=0),  # git diff --cached --name-only
+        ]
+        result = scan_diff(self.tmpdir, "HEAD")
+        self.assertIn("STAGED CHANGES", result)
+        self.assertIn("UNSTAGED CHANGES", result)
+        self.assertIn("file_a.py", result)
+        self.assertIn("file_b.py", result)
+
+
+class TestDiffModeOrchestrator(unittest.TestCase):
+    """Integration test for diff mode in the orchestrator."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        Path(os.path.join(self.tmpdir, "main.py")).write_text("print('hello')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable.run_codex')
+    @patch('ai_roundtable.run_claude')
+    @patch('ai_roundtable.preflight_check')
+    @patch('ai_roundtable.scan_diff')
+    def test_diff_mode_uses_scan_diff(self, mock_scan_diff, mock_preflight, mock_claude, mock_codex):
+        """When diff_target is set, should use scan_diff instead of scan_project."""
+        mock_scan_diff.return_value = f"<{_PROJECT_DATA_TAG}>\ndiff content\n</{_PROJECT_DATA_TAG}>"
+        mock_claude.return_value = self._ok_result("Claude diff review")
+        mock_codex.return_value = self._ok_result("Codex diff review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
+                                output_file=output, diff_target="HEAD")
+        mock_scan_diff.assert_called_once_with(self.tmpdir, "HEAD")
+        self.assertIn("Claude diff review", result)
+
+    @patch('ai_roundtable.preflight_check')
+    @patch('ai_roundtable.scan_diff')
+    def test_diff_mode_no_changes_returns_early(self, mock_scan_diff, mock_preflight):
+        """When scan_diff returns None (no changes), should return early."""
+        mock_scan_diff.return_value = None
+        output = os.path.join(self.tmpdir, "test_output.md")
+        result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
+                                output_file=output, diff_target="HEAD")
+        self.assertEqual(result, "")
 
 
 if __name__ == "__main__":
