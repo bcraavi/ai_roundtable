@@ -19,8 +19,8 @@ CODEX_SUBCMD = "exec"       # Codex subcommand for non-interactive mode
 # Claude CLI flags for non-interactive print mode
 CLAUDE_FLAGS = ["-p"]
 
-# Codex CLI flags (--search enables live web search for up-to-date results)
-CODEX_FLAGS = ["--skip-git-repo-check", "--search"]
+# Codex CLI flags
+CODEX_FLAGS = ["--skip-git-repo-check"]
 
 # Maximum character budget for conversation history injected into prompts.
 # 12k chars ~3k tokens — keeps prompts within context limits for both CLIs
