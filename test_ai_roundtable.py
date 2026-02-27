@@ -1018,7 +1018,7 @@ class TestDiffTargetValidation(unittest.TestCase):
 
     def test_valid_targets(self):
         """These should all pass validation."""
-        valid = ["HEAD", "main", "HEAD~3", "feature/my-branch", "v1.0.0", "abc123"]
+        valid = ["HEAD", "main", "HEAD~3", "feature/my-branch", "v1.0.0", "abc123", "@{u}", "@{upstream}"]
         for target in valid:
             validate_diff_target(target)  # should not raise
 

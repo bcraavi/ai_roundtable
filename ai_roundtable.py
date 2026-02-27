@@ -406,16 +406,17 @@ def scan_project(project_path: str) -> str:
 
 # ============================================================
 # DIFF-AWARE SCANNING
-# Regex for validating git diff targets (branches, tags, HEAD~N, etc.)
+# Regex for validating git diff targets (branches, tags, HEAD~N, @{u}, etc.)
 # Rejects flag-like inputs (starting with -) to prevent git option injection.
-_DIFF_TARGET_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.~^/\\-]*$')
+# Allows: letters, digits, ., _, ~, ^, /, \, -, @, {, }
+_DIFF_TARGET_RE = re.compile(r'^[A-Za-z0-9@][A-Za-z0-9_.~^/\\@{}\-]*$')
 
 def validate_diff_target(target: str) -> None:
     """Validate a git diff target string. Raises RoundtableError if invalid."""
-    if not _DIFF_TARGET_RE.match(target):
+    if not target or not _DIFF_TARGET_RE.match(target):
         raise RoundtableError(
             f"Invalid diff target: '{target}'. "
-            "Must be a branch name, tag, or HEAD~N (cannot start with '-')."
+            "Must be a branch name, tag, HEAD~N, or @{{u}} (cannot start with '-')."
         )
 
 # ============================================================
@@ -446,25 +447,34 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
 
     # Get the diff
     try:
-        diff_result = subprocess.run(
-            ["git", "diff", diff_target],
-            capture_output=True, text=True, cwd=project_path, timeout=30
-        )
-        # git diff returns 1 for diff errors (bad ref etc.), 0 or 1 for success
-        # but stderr indicates real errors
-        if diff_result.returncode != 0 and diff_result.stderr.strip():
-            raise RoundtableError(f"git diff failed: {diff_result.stderr.strip()}")
-        diff_text = diff_result.stdout.strip()
-
-        # Also get staged changes if diffing against HEAD
         if diff_target == "HEAD":
+            # Use separate commands to avoid double-counting staged changes:
+            # git diff (unstaged only) + git diff --cached (staged only)
+            unstaged_result = subprocess.run(
+                ["git", "diff"],
+                capture_output=True, text=True, cwd=project_path, timeout=30
+            )
             staged_result = subprocess.run(
                 ["git", "diff", "--cached"],
                 capture_output=True, text=True, cwd=project_path, timeout=30
             )
+            unstaged = unstaged_result.stdout.strip()
             staged = staged_result.stdout.strip()
-            if staged:
-                diff_text = f"=== STAGED CHANGES ===\n{staged}\n\n=== UNSTAGED CHANGES ===\n{diff_text}" if diff_text else staged
+            if staged and unstaged:
+                diff_text = f"=== STAGED CHANGES ===\n{staged}\n\n=== UNSTAGED CHANGES ===\n{unstaged}"
+            elif staged:
+                diff_text = staged
+            else:
+                diff_text = unstaged
+        else:
+            diff_result = subprocess.run(
+                ["git", "diff", diff_target],
+                capture_output=True, text=True, cwd=project_path, timeout=30
+            )
+            # git diff stderr indicates real errors
+            if diff_result.returncode != 0 and diff_result.stderr.strip():
+                raise RoundtableError(f"git diff failed: {diff_result.stderr.strip()}")
+            diff_text = diff_result.stdout.strip()
     except subprocess.TimeoutExpired:
         raise RoundtableError("git diff timed out.")
     except RoundtableError:
@@ -477,18 +487,24 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
 
     # Get changed file list
     try:
-        names_result = subprocess.run(
-            ["git", "diff", "--name-only", diff_target],
-            capture_output=True, text=True, cwd=project_path, timeout=10
-        )
-        changed_files = names_result.stdout.strip().split('\n') if names_result.stdout.strip() else []
         if diff_target == "HEAD":
+            # Separate unstaged + staged file lists (mirrors diff logic above)
+            unstaged_names = subprocess.run(
+                ["git", "diff", "--name-only"],
+                capture_output=True, text=True, cwd=project_path, timeout=10
+            )
             staged_names = subprocess.run(
                 ["git", "diff", "--cached", "--name-only"],
                 capture_output=True, text=True, cwd=project_path, timeout=10
             )
-            if staged_names.stdout.strip():
-                changed_files = list(set(changed_files + staged_names.stdout.strip().split('\n')))
+            all_names = (unstaged_names.stdout.strip() + "\n" + staged_names.stdout.strip()).strip()
+            changed_files = list(set(all_names.split('\n'))) if all_names else []
+        else:
+            names_result = subprocess.run(
+                ["git", "diff", "--name-only", diff_target],
+                capture_output=True, text=True, cwd=project_path, timeout=10
+            )
+            changed_files = names_result.stdout.strip().split('\n') if names_result.stdout.strip() else []
     except Exception:
         changed_files = []
 
