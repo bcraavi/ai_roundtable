@@ -24,7 +24,7 @@ class RunnerResult:
     ok: bool                      # True if the agent produced usable output
     output: str                   # The agent's response text (or error message)
     exit_code: Optional[int]      # Process exit code, None on transport errors
-    error_type: Optional[str]     # None, "timeout", "not_found", "exit_error", "exception"
+    error_type: Optional[str]     # None, "timeout", "not_found", "exit_error", "empty_response", "exception"
 
 
 @dataclass

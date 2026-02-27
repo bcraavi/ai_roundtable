@@ -124,7 +124,10 @@ def _fetch_versions(tech_stack: List[str]) -> Dict[str, str]:
         remaining = max(0, deadline - time.monotonic())
         t.join(timeout=remaining)
 
-    return versions
+    # Copy under lock — daemon threads that missed the deadline may still
+    # be writing to versions after join(timeout) returns.
+    with lock:
+        return dict(versions)
 
 
 def get_web_search_instruction(agent: str) -> str:

@@ -99,55 +99,65 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
             except (OSError, ValueError):
                 pass
 
-        out_t = threading.Thread(target=_drain_bounded, args=(proc.stdout, stdout_chunks), daemon=True)
-        err_t = threading.Thread(target=_drain_bounded, args=(proc.stderr, stderr_chunks), daemon=True)
-        out_t.start()
-        err_t.start()
-
-        timed_out = False
         try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+            out_t = threading.Thread(target=_drain_bounded, args=(proc.stdout, stdout_chunks), daemon=True)
+            err_t = threading.Thread(target=_drain_bounded, args=(proc.stderr, stderr_chunks), daemon=True)
+            out_t.start()
+            err_t.start()
 
-        out_t.join(timeout=2 if timed_out else 30)
-        err_t.join(timeout=2 if timed_out else 30)
-
-        # Cleanup pipes
-        for pipe in (proc.stdout, proc.stderr):
+            timed_out = False
             try:
-                if pipe and not pipe.closed:
-                    pipe.close()
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+
+            out_t.join(timeout=2 if timed_out else 30)
+            err_t.join(timeout=2 if timed_out else 30)
+
+            if timed_out:
+                return RunnerResult(ok=False, output=f"{agent_name} CLI timed out — try increasing --timeout",
+                                    exit_code=None, error_type="timeout")
+
+            stdout = "".join(stdout_chunks).strip()
+            stderr = "".join(stderr_chunks).strip()
+
+            if proc.returncode != 0:
+                if stderr:
+                    print_warn(f"{agent_name} CLI exited with code {proc.returncode}: {sanitize_terminal_output(stderr[:200])}")
+                if not stdout:
+                    return RunnerResult(
+                        ok=False, output=f"{agent_name} exited with code {proc.returncode}: {sanitize_terminal_output(stderr) or 'No output'}",
+                        exit_code=proc.returncode, error_type="exit_error"
+                    )
+                print_warn(f"{agent_name} CLI exited with code {proc.returncode} but produced output; using it.")
+            if not stdout:
+                err_detail = f": {stderr[:200]}" if stderr else ""
+                etype = "empty_response" if (proc.returncode or 0) == 0 else "exit_error"
+                return RunnerResult(ok=False, output=f"No response from {agent_name}{err_detail}",
+                                    exit_code=proc.returncode, error_type=etype)
+            return RunnerResult(ok=True, output=stdout, exit_code=proc.returncode, error_type=None)
+        finally:
+            # Ensure process is reaped and pipes closed (matches streaming path)
+            try:
+                if proc.poll() is None:
+                    proc.kill()
             except OSError:
                 pass
-
-        if timed_out:
-            return RunnerResult(ok=False, output=f"{agent_name} CLI timed out — try increasing --timeout",
-                                exit_code=None, error_type="timeout")
-
-        stdout = "".join(stdout_chunks).strip()
-        stderr = "".join(stderr_chunks).strip()
-
-        if proc.returncode != 0:
-            if stderr:
-                print_warn(f"{agent_name} CLI exited with code {proc.returncode}: {sanitize_terminal_output(stderr[:200])}")
-            if not stdout:
-                return RunnerResult(
-                    ok=False, output=f"{agent_name} exited with code {proc.returncode}: {sanitize_terminal_output(stderr) or 'No output'}",
-                    exit_code=proc.returncode, error_type="exit_error"
-                )
-            print_warn(f"{agent_name} CLI exited with code {proc.returncode} but produced output; using it.")
-        if not stdout:
-            err_detail = f": {stderr[:200]}" if stderr else ""
-            etype = "empty_response" if (proc.returncode or 0) == 0 else "exit_error"
-            return RunnerResult(ok=False, output=f"No response from {agent_name}{err_detail}",
-                                exit_code=proc.returncode, error_type=etype)
-        return RunnerResult(ok=True, output=stdout, exit_code=proc.returncode, error_type=None)
+            for pipe in (proc.stdout, proc.stderr):
+                try:
+                    if pipe and not pipe.closed:
+                        pipe.close()
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
     except Exception as e:
         return RunnerResult(ok=False, output=f"{agent_name} error: {str(e)}",
                             exit_code=None, error_type="exception")

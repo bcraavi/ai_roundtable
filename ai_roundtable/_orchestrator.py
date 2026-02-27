@@ -209,7 +209,7 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
 
             # Check for error responses — thread failure context so next agent is aware
             if not result.ok:
-                failure_msg = f"[AGENT FAILED: {result.error_type} — {result.output[:200]}]"
+                failure_msg = strip_sentinels(f"[AGENT FAILED: {result.error_type} — {result.output[:200]}]")
                 print_error(f"{agent_name} failed this round: {result.output}")
                 log.append(f"## {label} ({elapsed_str})")
                 log.append(f"**[AGENT ERROR]** {sanitize_terminal_output(result.output)}\n")
