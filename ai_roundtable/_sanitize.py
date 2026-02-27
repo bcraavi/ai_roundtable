@@ -63,6 +63,8 @@ def substitute_sentinels(template: str, replacements: Dict[str, str]) -> str:
     one sentinel (e.g., agent output containing __CONVERSATION_HISTORY__)
     cannot trigger substitution of another sentinel.
     """
+    if not replacements:
+        return template
     pattern = re.compile("|".join(re.escape(k) for k in replacements))
     return pattern.sub(lambda m: replacements[m.group(0)], template)
 

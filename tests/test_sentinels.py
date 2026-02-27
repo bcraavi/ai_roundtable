@@ -46,6 +46,11 @@ class TestSubstituteSentinels(unittest.TestCase):
         result = substitute_sentinels(template, {_PREV_RESPONSE: ""})
         self.assertEqual(result, "before  after")
 
+    def test_empty_replacement_map(self):
+        """Empty replacements dict should return template unchanged."""
+        result = substitute_sentinels("some text", {})
+        self.assertEqual(result, "some text")
+
     def test_braces_in_replacement_values(self):
         """Values with braces (JSON) should not cause issues."""
         template = f"Data: {_PREV_RESPONSE}"

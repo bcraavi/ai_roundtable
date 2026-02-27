@@ -61,10 +61,14 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
                 ["git", "diff"],
                 capture_output=True, text=True, cwd=project_path, timeout=30
             )
+            if unstaged_result.returncode != 0 and unstaged_result.stderr.strip():
+                raise RoundtableError(f"git diff failed: {unstaged_result.stderr.strip()}")
             staged_result = subprocess.run(
                 ["git", "diff", "--cached"],
                 capture_output=True, text=True, cwd=project_path, timeout=30
             )
+            if staged_result.returncode != 0 and staged_result.stderr.strip():
+                raise RoundtableError(f"git diff --cached failed: {staged_result.stderr.strip()}")
             unstaged = unstaged_result.stdout.strip()
             staged = staged_result.stdout.strip()
             if staged and unstaged:

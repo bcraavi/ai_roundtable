@@ -40,15 +40,20 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
             with os.fdopen(prompt_fd, 'w') as f:
                 f.write(prompt)
             with open(prompt_path, 'r') as prompt_file:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdin=prompt_file,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    cwd=project_path,
-                    env=env,
-                )
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdin=prompt_file,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        cwd=project_path,
+                        env=env,
+                    )
+                except FileNotFoundError:
+                    return RunnerResult(ok=False,
+                        output=f"'{cmd[0]}' not found. Is {agent_name} CLI installed and in PATH?",
+                        exit_code=None, error_type="not_found")
         except Exception:
             try:
                 os.unlink(prompt_path)
@@ -130,10 +135,10 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
 
         if proc.returncode != 0:
             if stderr:
-                print_warn(f"{agent_name} CLI exited with code {proc.returncode}: {stderr[:200]}")
+                print_warn(f"{agent_name} CLI exited with code {proc.returncode}: {sanitize_terminal_output(stderr[:200])}")
             if not stdout:
                 return RunnerResult(
-                    ok=False, output=f"{agent_name} exited with code {proc.returncode}: {stderr or 'No output'}",
+                    ok=False, output=f"{agent_name} exited with code {proc.returncode}: {sanitize_terminal_output(stderr) or 'No output'}",
                     exit_code=proc.returncode, error_type="exit_error"
                 )
             print_warn(f"{agent_name} CLI exited with code {proc.returncode} but produced output; using it.")
@@ -143,9 +148,6 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
             return RunnerResult(ok=False, output=f"No response from {agent_name}{err_detail}",
                                 exit_code=proc.returncode, error_type=etype)
         return RunnerResult(ok=True, output=stdout, exit_code=proc.returncode, error_type=None)
-    except FileNotFoundError:
-        return RunnerResult(ok=False, output=f"'{cmd[0]}' not found. Is {agent_name} CLI installed and in PATH?",
-                            exit_code=None, error_type="not_found")
     except Exception as e:
         return RunnerResult(ok=False, output=f"{agent_name} error: {str(e)}",
                             exit_code=None, error_type="exception")
@@ -169,15 +171,20 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
             with os.fdopen(prompt_fd, 'w') as f:
                 f.write(prompt)
             with open(prompt_path, 'r') as prompt_file:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdin=prompt_file,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    cwd=project_path,
-                    env=env,
-                )
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdin=prompt_file,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        cwd=project_path,
+                        env=env,
+                    )
+                except FileNotFoundError:
+                    return RunnerResult(ok=False,
+                        output=f"'{cmd[0]}' not found. Is {agent_name} CLI installed and in PATH?",
+                        exit_code=None, error_type="not_found")
         except Exception:
             try:
                 os.unlink(prompt_path)
@@ -290,9 +297,9 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
 
         if returncode != 0:
             if stderr.strip():
-                print_warn(f"{agent_name} CLI exited with code {returncode}: {stderr.strip()[:200]}")
+                print_warn(f"{agent_name} CLI exited with code {returncode}: {sanitize_terminal_output(stderr.strip()[:200])}")
             if not stdout:
-                return RunnerResult(ok=False, output=f"{agent_name} exited with code {returncode}: {stderr.strip() or 'No output'}",
+                return RunnerResult(ok=False, output=f"{agent_name} exited with code {returncode}: {sanitize_terminal_output(stderr.strip()) or 'No output'}",
                                     exit_code=returncode, error_type="exit_error")
         if not stdout:
             err_detail = f": {stderr.strip()[:200]}" if stderr.strip() else ""
@@ -300,9 +307,6 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
             return RunnerResult(ok=False, output=f"No response from {agent_name}{err_detail}",
                                 exit_code=returncode, error_type=etype)
         return RunnerResult(ok=True, output=stdout, exit_code=returncode, error_type=None)
-    except FileNotFoundError:
-        return RunnerResult(ok=False, output=f"'{cmd[0]}' not found. Is {agent_name} CLI installed and in PATH?",
-                            exit_code=None, error_type="not_found")
     except Exception as e:
         return RunnerResult(ok=False, output=f"{agent_name} error: {str(e)}",
                             exit_code=None, error_type="exception")
