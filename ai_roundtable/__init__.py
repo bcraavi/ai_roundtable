@@ -33,6 +33,8 @@ from ._constants import (
     MAX_OUTPUT_CHARS,
     MAX_PROMPT_CHARS,
     MAX_WORKFLOW_FILES,
+    COMPACT_MAX_RESPONSE_CHARS,
+    COMPACT_MAX_HISTORY_CHARS,
 )
 
 # Private constants — imported for backward compatibility and test access
@@ -123,6 +125,7 @@ __all__ = [
     "MAX_CONFIG_FILE_CHARS", "MAX_SOURCE_CHARS", "MAX_SOURCE_FILE_CHARS",
     "MAX_RESPONSE_CHARS", "MAX_OUTPUT_CHARS", "MAX_PROMPT_CHARS",
     "MAX_WORKFLOW_FILES",
+    "COMPACT_MAX_RESPONSE_CHARS", "COMPACT_MAX_HISTORY_CHARS",
     # Types
     "RoundtableError", "RuntimeConfig", "RunnerResult", "Round",
     # Protocols

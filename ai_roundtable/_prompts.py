@@ -16,9 +16,110 @@ FOCUS_PROMPTS = {
     "all": "architecture, code quality, performance, security, developer experience, testing, and overall product maturity"
 }
 
+# ============================================================
+# Compact format instructions (default — inter-agent communication)
+# ============================================================
+
+_COMPACT_FORMAT_R1 = """\
+OUTPUT FORMAT (compact — another AI agent reads this, not a human):
+
+strengths:
+- brief description (1 line each)
+
+concerns:
+- sev: critical|high|medium|low
+  loc: file:line
+  issue: one-line description
+  fix: suggested fix (1 line)
+
+recommendations:
+- effort: quick|medium|large
+  action: what to do (1 line)
+
+questions:
+- question (1 line each)
+
+features:
+- name: feature name
+  value: why it matters (1 line)
+
+Reference files:lines. No paragraphs. Keep response under 4000 characters."""
+
+_COMPACT_FORMAT_R2 = """\
+OUTPUT FORMAT (compact — another AI agent reads this, not a human):
+
+agree:
+- loc: file:line, why (1 line)
+
+disagree:
+- loc: file:line, counter: alternative take (1 line)
+
+missed:
+- sev: H|M|L, loc: file:line, issue: desc, fix: suggestion
+
+top5:
+1. [sev] issue — fix (1 line each)
+
+features:
+- name: feature, value: why (1 line each)
+
+Keep response under 4000 characters."""
+
+_COMPACT_FORMAT_R3 = """\
+OUTPUT FORMAT (compact — another AI agent reads this, not a human):
+
+concessions:
+- what changed your mind (1 line each)
+
+rebuttals:
+- loc: file:line, position: your stance, evidence: why (1 line)
+
+synthesis:
+- priority: H|M|L, action: what to do, effort: quick|medium|large
+
+feature_roadmap:
+1. name — why build first (1 line each)
+
+Keep response under 4000 characters."""
+
+_COMPACT_FORMAT_R4 = """\
+OUTPUT FORMAT (compact — another AI agent reads this, not a human):
+
+quick_wins:
+- action (1 line each, top 3)
+
+strategic:
+- action (1 line each, top 3)
+
+features:
+- name: brief spec (1 line each, top 3)
+
+scores:
+  architecture: N/10, reason (1 line)
+  code_quality: N/10, reason (1 line)
+  production_readiness: N/10, reason (1 line)
+
+verdict: single most important thing to fix or build (1 line)
+
+Keep response under 4000 characters."""
+
+_COMPACT_FORMAT_OVERFLOW = """\
+OUTPUT FORMAT (compact — another AI agent reads this, not a human):
+
+resolved:
+- item (1 line each)
+
+open:
+- sev: H|M|L, issue: desc, fix: suggestion (1 line each)
+
+new_insights:
+- insight (1 line each)
+
+Keep response under 4000 characters."""
+
 
 def build_round_prompts(project_summary: str, focus: str, num_rounds: int,
-                        web_context: str = "") -> List[Round]:
+                        web_context: str = "", verbose: bool = False) -> List[Round]:
     """Build the sequence of prompts for the discussion.
 
     Uses sentinel tokens (__PREV_RESPONSE__, __CONVERSATION_HISTORY__)
@@ -26,12 +127,135 @@ def build_round_prompts(project_summary: str, focus: str, num_rounds: int,
 
     When web_context is provided, it is prepended to every prompt so agents
     have up-to-date technology context and web search instructions.
+
+    When verbose=False (default), agents emit compact structured output
+    optimized for inter-agent consumption. When verbose=True, agents use
+    prose templates readable by humans.
     """
     focus_desc = FOCUS_PROMPTS.get(focus, FOCUS_PROMPTS["all"])
 
     # Web context prefix (empty string if no web context)
     web_prefix = f"{web_context}\n\n" if web_context else ""
 
+    if verbose:
+        return _build_verbose_prompts(project_summary, focus_desc, num_rounds, web_prefix)
+    return _build_compact_prompts(project_summary, focus_desc, num_rounds, web_prefix)
+
+
+def _build_compact_prompts(project_summary: str, focus_desc: str,
+                           num_rounds: int, web_prefix: str) -> List[Round]:
+    """Build compact structured-output prompts for inter-agent communication."""
+    rounds: List[Round] = []
+
+    # Round 1: Claude opens with initial review
+    rounds.append(Round(
+        agent="claude",
+        label="Round 1 — Claude's Opening Review",
+        prompt=web_prefix + textwrap.dedent(f"""\
+            You are participating in a multi-agent code review roundtable.
+            You are Agent A (Claude). Another AI agent (Codex) will review your analysis and respond.
+
+            {project_summary}
+
+            YOUR TASK:
+            Review this project focusing on: {focus_desc}
+
+            {_COMPACT_FORMAT_R1}""")
+    ))
+
+    if num_rounds >= 2:
+        rounds.append(Round(
+            agent="codex",
+            label="Round 2 — Codex's Counter-Review",
+            prompt_template=web_prefix + textwrap.dedent(f"""\
+                You are participating in a multi-agent code review roundtable.
+                You are Agent B (Codex). Another AI agent (Claude) has just reviewed this project.
+
+                {project_summary}
+
+                PRIOR DISCUSSION:
+                {_CONVERSATION_HISTORY}
+
+                CLAUDE'S LATEST REVIEW:
+                {_PREV_RESPONSE}
+
+                YOUR TASK:
+                Respond to Claude's review. Focus areas: {focus_desc}
+
+                {_COMPACT_FORMAT_R2}""")
+        ))
+
+    if num_rounds >= 3:
+        rounds.append(Round(
+            agent="claude",
+            label="Round 3 — Claude's Rebuttal & Synthesis",
+            prompt_template=web_prefix + textwrap.dedent(f"""\
+                You are Agent A (Claude) in a code review roundtable.
+                Agent B (Codex) has responded to your initial review.
+
+                {project_summary}
+
+                PRIOR DISCUSSION:
+                {_CONVERSATION_HISTORY}
+
+                CODEX'S LATEST RESPONSE:
+                {_PREV_RESPONSE}
+
+                YOUR TASK:
+                Synthesize both reviews. Focus areas: {focus_desc}
+
+                {_COMPACT_FORMAT_R3}""")
+        ))
+
+    if num_rounds >= 4:
+        rounds.append(Round(
+            agent="codex",
+            label="Round 4 — Codex's Final Recommendations",
+            prompt_template=web_prefix + textwrap.dedent(f"""\
+                You are Agent B (Codex) in a code review roundtable.
+                This is the final round. Claude has synthesized both your reviews.
+
+                {project_summary}
+
+                PRIOR DISCUSSION:
+                {_CONVERSATION_HISTORY}
+
+                CLAUDE'S SYNTHESIS:
+                {_PREV_RESPONSE}
+
+                YOUR TASK:
+                Give your final verdict.
+
+                {_COMPACT_FORMAT_R4}""")
+        ))
+
+    if num_rounds > 4:
+        for i in range(4, num_rounds):
+            agent = "claude" if i % 2 == 0 else "codex"
+            other = "Codex" if agent == "claude" else "Claude"
+            rounds.append(Round(
+                agent=agent,
+                label=f"Round {i+1} — {'Claude' if agent == 'claude' else 'Codex'} Follow-up",
+                prompt_template=web_prefix + textwrap.dedent(f"""\
+                    Continue the code review roundtable discussion.
+
+                    PRIOR DISCUSSION:
+                    {_CONVERSATION_HISTORY}
+
+                    {other}'s last response:
+                    {_PREV_RESPONSE}
+
+                    Focus on: {focus_desc}
+
+                    {_COMPACT_FORMAT_OVERFLOW}""")
+            ))
+
+    return rounds
+
+
+def _build_verbose_prompts(project_summary: str, focus_desc: str,
+                           num_rounds: int, web_prefix: str) -> List[Round]:
+    """Build verbose prose prompts for human-readable output (original format)."""
     rounds: List[Round] = []
 
     # Round 1: Claude opens with initial review

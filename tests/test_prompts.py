@@ -12,7 +12,7 @@ from ai_roundtable import (
 
 
 class TestBuildRoundPrompts(unittest.TestCase):
-    """Tests for round prompt construction."""
+    """Tests for round prompt construction (compact mode — default)."""
 
     def test_default_four_rounds(self):
         rounds = build_round_prompts("test summary", "all", 4)
@@ -89,6 +89,96 @@ class TestBuildRoundPrompts(unittest.TestCase):
         rounds = build_round_prompts("test", "all", 6)
         agents = [r.agent for r in rounds]
         self.assertEqual(agents, ["claude", "codex", "claude", "codex", "claude", "codex"])
+
+
+class TestCompactPrompts(unittest.TestCase):
+    """Tests specific to compact (default) prompt format."""
+
+    def test_compact_round1_has_format_instructions(self):
+        """Compact round 1 should include structured output format."""
+        rounds = build_round_prompts("test summary", "all", 4)
+        self.assertIn("strengths:", rounds[0].prompt)
+        self.assertIn("concerns:", rounds[0].prompt)
+        self.assertIn("Keep response under 4000 characters", rounds[0].prompt)
+
+    def test_compact_round2_has_format_instructions(self):
+        rounds = build_round_prompts("test summary", "all", 4)
+        self.assertIn("agree:", rounds[1].prompt_template)
+        self.assertIn("disagree:", rounds[1].prompt_template)
+        self.assertIn("top5:", rounds[1].prompt_template)
+
+    def test_compact_round3_has_format_instructions(self):
+        rounds = build_round_prompts("test summary", "all", 4)
+        self.assertIn("concessions:", rounds[2].prompt_template)
+        self.assertIn("synthesis:", rounds[2].prompt_template)
+        self.assertIn("feature_roadmap:", rounds[2].prompt_template)
+
+    def test_compact_round4_has_format_instructions(self):
+        rounds = build_round_prompts("test summary", "all", 4)
+        self.assertIn("quick_wins:", rounds[3].prompt_template)
+        self.assertIn("scores:", rounds[3].prompt_template)
+        self.assertIn("verdict:", rounds[3].prompt_template)
+
+    def test_compact_overflow_has_format_instructions(self):
+        rounds = build_round_prompts("test summary", "all", 6)
+        self.assertIn("resolved:", rounds[4].prompt_template)
+        self.assertIn("open:", rounds[4].prompt_template)
+
+    def test_compact_is_default(self):
+        """Default (no verbose flag) should produce compact prompts."""
+        compact = build_round_prompts("test", "all", 2)
+        verbose = build_round_prompts("test", "all", 2, verbose=True)
+        # Compact round 1 should have structured format markers
+        self.assertIn("strengths:", compact[0].prompt)
+        # Verbose round 1 should have prose instructions
+        self.assertIn("STRENGTHS", verbose[0].prompt)
+        self.assertNotIn("strengths:", verbose[0].prompt)
+
+
+class TestVerbosePrompts(unittest.TestCase):
+    """Tests for verbose (prose) prompt format."""
+
+    def test_verbose_four_rounds(self):
+        rounds = build_round_prompts("test summary", "all", 4, verbose=True)
+        self.assertEqual(len(rounds), 4)
+
+    def test_verbose_round_types(self):
+        rounds = build_round_prompts("test summary", "all", 4, verbose=True)
+        self.assertIsNotNone(rounds[0].prompt)
+        self.assertIsNone(rounds[0].prompt_template)
+        for r in rounds[1:]:
+            self.assertIsNotNone(r.prompt_template)
+            self.assertIsNone(r.prompt)
+
+    def test_verbose_has_prose_instructions(self):
+        """Verbose prompts should contain the original prose structure."""
+        rounds = build_round_prompts("test summary", "all", 4, verbose=True)
+        self.assertIn("STRENGTHS", rounds[0].prompt)
+        self.assertIn("CONCERNS", rounds[0].prompt)
+        self.assertIn("RECOMMENDATIONS", rounds[0].prompt)
+        self.assertIn("QUESTIONS", rounds[0].prompt)
+        self.assertIn("NEW FEATURE IDEAS", rounds[0].prompt)
+
+    def test_verbose_no_compact_markers(self):
+        """Verbose prompts should NOT contain compact format instructions."""
+        rounds = build_round_prompts("test summary", "all", 4, verbose=True)
+        self.assertNotIn("Keep response under 4000 characters", rounds[0].prompt)
+        self.assertNotIn("sev: critical|high|medium|low", rounds[0].prompt)
+
+    def test_verbose_templates_contain_sentinels(self):
+        rounds = build_round_prompts("test summary", "all", 4, verbose=True)
+        for r in rounds[1:]:
+            self.assertIn(_PREV_RESPONSE, r.prompt_template)
+            self.assertIn(_CONVERSATION_HISTORY, r.prompt_template)
+
+    def test_verbose_agent_alternation(self):
+        rounds = build_round_prompts("test", "all", 6, verbose=True)
+        agents = [r.agent for r in rounds]
+        self.assertEqual(agents, ["claude", "codex", "claude", "codex", "claude", "codex"])
+
+    def test_verbose_six_rounds(self):
+        rounds = build_round_prompts("test summary", "all", 6, verbose=True)
+        self.assertEqual(len(rounds), 6)
 
 
 class TestRoundLabels(unittest.TestCase):

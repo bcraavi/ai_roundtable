@@ -14,6 +14,8 @@ from typing import Optional, List
 
 from ._constants import (
     MAX_RESPONSE_CHARS, MAX_PROMPT_CHARS,
+    MAX_HISTORY_CHARS,
+    COMPACT_MAX_RESPONSE_CHARS, COMPACT_MAX_HISTORY_CHARS,
     _PREV_RESPONSE, _CONVERSATION_HISTORY,
 )
 from ._types import RoundtableError
@@ -32,7 +34,8 @@ from ._log import save_log
 
 def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                    timeout: int = 120, interactive: bool = True, output_file: Optional[str] = None,
-                   dry_run: bool = False, diff_target: Optional[str] = None):
+                   dry_run: bool = False, diff_target: Optional[str] = None,
+                   verbose: bool = False):
     """Run the full multi-agent roundtable discussion."""
     Colors._resolve()
 
@@ -66,8 +69,13 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     # Skip network fetches in dry-run mode to avoid unexpected outbound calls
     web_context = build_web_context(project_summary, offline=dry_run)
 
+    # Select budgets based on verbose mode
+    max_response = MAX_RESPONSE_CHARS if verbose else COMPACT_MAX_RESPONSE_CHARS
+    max_history = MAX_HISTORY_CHARS if verbose else COMPACT_MAX_HISTORY_CHARS
+
     # Build prompts (web context is baked into each round's prompt)
-    rounds = build_round_prompts(project_summary, focus, num_rounds, web_context=web_context)
+    rounds = build_round_prompts(project_summary, focus, num_rounds,
+                                 web_context=web_context, verbose=verbose)
 
     # Resolve output file path early so interrupt handler can use it.
     # Fall back to a temp directory if the project directory is not writable.
@@ -125,12 +133,13 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             # Build prompt using single-pass sentinel substitution
             if round_info.prompt_template is not None:
                 history_text = build_history_summary(
-                    conversation_history, exclude_last=True
+                    conversation_history, max_chars=max_history,
+                    exclude_last=True, compact=not verbose
                 )
                 # Truncate previous response to prevent context blowups
                 prev = previous_response
-                if len(prev) > MAX_RESPONSE_CHARS:
-                    prev = prev[:MAX_RESPONSE_CHARS] + "\n... (response truncated for context budget)"
+                if len(prev) > max_response:
+                    prev = prev[:max_response] + "\n... (response truncated for context budget)"
                 prompt = substitute_sentinels(round_info.prompt_template, {
                     _PREV_RESPONSE: prev,
                     _CONVERSATION_HISTORY: history_text or "(This is the first exchange.)",

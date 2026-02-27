@@ -105,5 +105,44 @@ class TestBuildHistoryExcludeLast(unittest.TestCase):
         self.assertIn("Second.", result)
 
 
+class TestCompactHistory(unittest.TestCase):
+    """Tests for compact history labels."""
+
+    def test_compact_shortens_round_labels(self):
+        """Compact mode should shorten 'Round N — ...' to 'RN'."""
+        history = [
+            {"label": "Round 1 — Claude's Opening Review", "agent": "Claude", "response": "Review."},
+            {"label": "Round 2 — Codex's Counter-Review", "agent": "Codex", "response": "Counter."},
+        ]
+        result = build_history_summary(history, compact=True)
+        self.assertIn("### R1 (Claude)", result)
+        self.assertIn("### R2 (Codex)", result)
+        self.assertNotIn("Opening Review", result)
+
+    def test_compact_false_keeps_full_labels(self):
+        """Non-compact mode should keep full labels."""
+        history = [
+            {"label": "Round 1 — Claude's Opening Review", "agent": "Claude", "response": "Review."},
+        ]
+        result = build_history_summary(history, compact=False)
+        self.assertIn("Round 1 — Claude's Opening Review", result)
+
+    def test_compact_preserves_developer_labels(self):
+        """Developer direction labels (non-Round) should pass through in compact mode."""
+        history = [
+            {"label": "Developer direction before Round 2", "agent": "Developer", "response": "Focus auth."},
+        ]
+        result = build_history_summary(history, compact=True)
+        self.assertIn("Developer direction before Round 2", result)
+
+    def test_compact_default_is_false(self):
+        """Default compact=False should produce full labels."""
+        history = [
+            {"label": "Round 1 — Claude's Opening Review", "agent": "Claude", "response": "Review."},
+        ]
+        result = build_history_summary(history)
+        self.assertIn("Round 1 — Claude's Opening Review", result)
+
+
 if __name__ == "__main__":
     unittest.main()

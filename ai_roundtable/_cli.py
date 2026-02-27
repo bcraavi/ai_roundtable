@@ -46,6 +46,8 @@ def main():
     parser.add_argument("--diff", type=str, nargs="?", const="HEAD", default=None,
                         metavar="TARGET",
                         help="Review only changed files (diff mode). TARGET can be HEAD (default), a branch name, or HEAD~N.")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Use verbose prose output (default: compact structured format for inter-agent efficiency)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
@@ -77,7 +79,8 @@ def main():
             interactive=not args.no_interactive,
             output_file=args.output,
             dry_run=args.dry_run,
-            diff_target=args.diff
+            diff_target=args.diff,
+            verbose=args.verbose
         )
     except RoundtableError as e:
         print_error(str(e))

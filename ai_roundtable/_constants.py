@@ -55,6 +55,11 @@ MAX_SOURCE_FILE_CHARS = 5000
 # Prevents context blowups when an agent produces very long output.
 MAX_RESPONSE_CHARS = 15000
 
+# Compact-mode budgets — used when agents talk to each other (default).
+# Structured output is ~40-60% smaller than prose, so budgets shrink accordingly.
+COMPACT_MAX_RESPONSE_CHARS = 6000
+COMPACT_MAX_HISTORY_CHARS = 8000
+
 # Maximum characters of subprocess output to retain per stream.
 # With text=True on Popen, we count characters not bytes.
 # 2M chars is generous — typical agent responses are 10-50K chars.

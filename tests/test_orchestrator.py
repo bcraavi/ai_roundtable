@@ -234,6 +234,101 @@ class TestDiffModeOrchestrator(unittest.TestCase):
         self.assertEqual(result, "")
 
 
+class TestVerboseFlag(unittest.TestCase):
+    """Tests for --verbose flag passthrough."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        Path(os.path.join(self.tmpdir, "main.py")).write_text("print('hello')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable._orchestrator.run_codex')
+    @patch('ai_roundtable._orchestrator.run_claude')
+    @patch('ai_roundtable._orchestrator.preflight_check')
+    @patch('ai_roundtable._orchestrator.build_round_prompts')
+    def test_verbose_passed_to_build_round_prompts(self, mock_prompts, mock_preflight, mock_claude, mock_codex):
+        """verbose=True should be passed to build_round_prompts."""
+        from ai_roundtable._types import Round
+        mock_prompts.return_value = [
+            Round(agent="claude", label="Round 1 — Claude's Opening Review",
+                  prompt="test prompt"),
+            Round(agent="codex", label="Round 2 — Codex's Counter-Review",
+                  prompt_template="test __PREV_RESPONSE__ __CONVERSATION_HISTORY__"),
+        ]
+        mock_claude.return_value = self._ok_result("Claude review")
+        mock_codex.return_value = self._ok_result("Codex review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
+                       output_file=output, verbose=True)
+        _, kwargs = mock_prompts.call_args
+        self.assertTrue(kwargs.get('verbose', False))
+
+    @patch('ai_roundtable._orchestrator.run_codex')
+    @patch('ai_roundtable._orchestrator.run_claude')
+    @patch('ai_roundtable._orchestrator.preflight_check')
+    @patch('ai_roundtable._orchestrator.build_round_prompts')
+    def test_compact_default_passed_to_build_round_prompts(self, mock_prompts, mock_preflight, mock_claude, mock_codex):
+        """Default (no verbose) should pass verbose=False to build_round_prompts."""
+        from ai_roundtable._types import Round
+        mock_prompts.return_value = [
+            Round(agent="claude", label="Round 1 — Claude's Opening Review",
+                  prompt="test prompt"),
+            Round(agent="codex", label="Round 2 — Codex's Counter-Review",
+                  prompt_template="test __PREV_RESPONSE__ __CONVERSATION_HISTORY__"),
+        ]
+        mock_claude.return_value = self._ok_result("Claude review")
+        mock_codex.return_value = self._ok_result("Codex review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
+                       output_file=output)
+        _, kwargs = mock_prompts.call_args
+        self.assertFalse(kwargs.get('verbose', True))
+
+    @patch('ai_roundtable._orchestrator.run_codex')
+    @patch('ai_roundtable._orchestrator.run_claude')
+    @patch('ai_roundtable._orchestrator.preflight_check')
+    def test_compact_uses_smaller_response_budget(self, mock_preflight, mock_claude, mock_codex):
+        """Compact mode should truncate responses at COMPACT_MAX_RESPONSE_CHARS."""
+        from ai_roundtable import COMPACT_MAX_RESPONSE_CHARS
+        # Claude produces a response longer than compact budget
+        long_response = "x" * (COMPACT_MAX_RESPONSE_CHARS + 2000)
+        mock_claude.return_value = self._ok_result(long_response)
+        mock_codex.return_value = self._ok_result("Codex review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+        # The prompt passed to codex should have the response truncated
+        codex_call = mock_codex.call_args
+        prompt = codex_call[0][0]
+        # The truncated response should not contain the full long_response
+        self.assertNotIn(long_response, prompt)
+        self.assertIn("response truncated for context budget", prompt)
+
+    @patch('ai_roundtable._orchestrator.run_codex')
+    @patch('ai_roundtable._orchestrator.run_claude')
+    @patch('ai_roundtable._orchestrator.preflight_check')
+    def test_verbose_uses_larger_response_budget(self, mock_preflight, mock_claude, mock_codex):
+        """Verbose mode should use the full MAX_RESPONSE_CHARS budget."""
+        from ai_roundtable import MAX_RESPONSE_CHARS, COMPACT_MAX_RESPONSE_CHARS
+        # Response larger than compact but smaller than verbose budget
+        mid_response = "x" * (COMPACT_MAX_RESPONSE_CHARS + 2000)
+        assert len(mid_response) < MAX_RESPONSE_CHARS, "Test assumes mid_response fits verbose budget"
+        mock_claude.return_value = self._ok_result(mid_response)
+        mock_codex.return_value = self._ok_result("Codex review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
+                       output_file=output, verbose=True)
+        codex_call = mock_codex.call_args
+        prompt = codex_call[0][0]
+        # In verbose mode, mid_response should NOT be truncated
+        self.assertNotIn("response truncated for context budget", prompt)
+
+
 class TestLogSanitization(unittest.TestCase):
     """Tests for ANSI sanitization in persisted logs."""
 

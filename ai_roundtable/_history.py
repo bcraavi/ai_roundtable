@@ -8,7 +8,7 @@ from ._constants import MAX_HISTORY_CHARS
 
 
 def build_history_summary(history: List[dict], max_chars: int = MAX_HISTORY_CHARS,
-                          exclude_last: bool = False) -> str:
+                          exclude_last: bool = False, compact: bool = False) -> str:
     """Build a rolling conversation summary from all prior rounds, truncated to budget.
 
     Preserves Round 1 (foundational analysis) and the most recent rounds,
@@ -16,6 +16,9 @@ def build_history_summary(history: List[dict], max_chars: int = MAX_HISTORY_CHAR
 
     When exclude_last=True, omits the last entry to avoid duplication with
     the separate __PREV_RESPONSE__ injection.
+
+    When compact=True, uses shorter round headers (e.g. "### R1 (Claude)")
+    to save tokens in inter-agent communication.
     """
     if not history:
         return ""
@@ -24,7 +27,21 @@ def build_history_summary(history: List[dict], max_chars: int = MAX_HISTORY_CHAR
 
     parts = []
     for entry in entries:
-        parts.append(f"### {entry['label']} ({entry['agent']})\n{entry['response']}")
+        if compact:
+            # Extract round number from label like "Round 3 — Claude's Rebuttal & Synthesis"
+            label = entry['label']
+            # Try to shorten "Round N — ..." to "RN"
+            if label.startswith("Round "):
+                parts_of_label = label.split(" ", 2)
+                if len(parts_of_label) >= 2 and parts_of_label[1].rstrip("—").strip().isdigit():
+                    short_label = f"R{parts_of_label[1].rstrip('—').strip()}"
+                else:
+                    short_label = label
+            else:
+                short_label = label
+            parts.append(f"### {short_label} ({entry['agent']})\n{entry['response']}")
+        else:
+            parts.append(f"### {entry['label']} ({entry['agent']})\n{entry['response']}")
 
     if not parts:
         return ""
