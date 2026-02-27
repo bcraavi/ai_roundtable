@@ -13,6 +13,7 @@ Usage:
 """
 
 import re
+import signal
 import subprocess
 import shutil
 import sys
@@ -387,8 +388,10 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
 
     # Check if it's a git repo
     try:
-        subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
-                       capture_output=True, text=True, cwd=project_path, timeout=10)
+        rev_check = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
+                                   capture_output=True, text=True, cwd=project_path, timeout=10)
+        if rev_check.returncode != 0:
+            raise RoundtableError(f"Not a git repository: {rev_check.stderr.strip()}")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         raise RoundtableError("git is not available or the path is not a git repository.")
 
@@ -398,6 +401,10 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
             ["git", "diff", diff_target],
             capture_output=True, text=True, cwd=project_path, timeout=30
         )
+        # git diff returns 1 for diff errors (bad ref etc.), 0 or 1 for success
+        # but stderr indicates real errors
+        if diff_result.returncode != 0 and diff_result.stderr.strip():
+            raise RoundtableError(f"git diff failed: {diff_result.stderr.strip()}")
         diff_text = diff_result.stdout.strip()
 
         # Also get staged changes if diffing against HEAD
@@ -411,6 +418,8 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
                 diff_text = f"=== STAGED CHANGES ===\n{staged}\n\n=== UNSTAGED CHANGES ===\n{diff_text}" if diff_text else staged
     except subprocess.TimeoutExpired:
         raise RoundtableError("git diff timed out.")
+    except RoundtableError:
+        raise
     except Exception as e:
         raise RoundtableError(f"Failed to get git diff: {e}")
 
@@ -573,7 +582,8 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
     finally:
         if proc is not None:
             try:
-                proc.kill()
+                if proc.poll() is None:
+                    proc.kill()
             except OSError:
                 pass
             for pipe in (proc.stdout, proc.stderr, proc.stdin):
@@ -850,7 +860,7 @@ def save_log(log: List[str], output_file: str, project_path: str, is_partial: bo
         log_content += "\n\n---\n*Discussion interrupted. Partial log saved.*\n"
     try:
         os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             f.write(log_content)
         label = "Partial discussion" if is_partial else "Discussion"
         print(f"\n{Colors.HEADER}{'=' * 64}")
@@ -876,7 +886,7 @@ def save_log(log: List[str], output_file: str, project_path: str, is_partial: bo
 # MAIN ORCHESTRATOR
 # ============================================================
 def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
-                   timeout: int = 120, interactive: bool = True, output_file: str = None,
+                   timeout: int = 120, interactive: bool = True, output_file: Optional[str] = None,
                    dry_run: bool = False, diff_target: Optional[str] = None):
     """Run the full multi-agent roundtable discussion."""
     print_banner()
@@ -926,6 +936,14 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
 
     previous_response = ""
     conversation_history: List[dict] = []
+
+    # Register SIGTERM handler for graceful shutdown in CI / process managers
+    _prev_sigterm = signal.getsignal(signal.SIGTERM)
+    def _sigterm_handler(signum, frame):
+        print(f"\n\n{Colors.WARN}SIGTERM received! Saving partial discussion log...{Colors.RESET}")
+        save_log(log, output_file, project_path, is_partial=True)
+        sys.exit(143)  # 128 + 15 (SIGTERM)
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     try:
         for i, round_info in enumerate(rounds):
@@ -1018,15 +1036,18 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                 "response": response
             })
 
-            # Log
+            # Log (sanitize ANSI before persisting to markdown)
             log.append(f"## {label}")
-            log.append(f"{response}\n")
+            log.append(f"{sanitize_terminal_output(response)}\n")
 
     except KeyboardInterrupt:
         print(f"\n\n{Colors.WARN}Interrupted! Saving partial discussion log...{Colors.RESET}")
         save_log(log, output_file, project_path, is_partial=True)
         print(f"\n{Colors.DIM}Roundtable interrupted.{Colors.RESET}\n")
         return "\n".join(log)
+
+    finally:
+        signal.signal(signal.SIGTERM, _prev_sigterm)
 
     # Save full discussion log
     log_content = save_log(log, output_file, project_path)
@@ -1073,6 +1094,11 @@ def main():
     # Validate timeout
     if args.timeout <= 0:
         print_error("--timeout must be a positive integer.")
+        sys.exit(1)
+
+    # Validate diff target (reject flag-like or malformed refs)
+    if args.diff is not None and not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.~^/\\-]*$', args.diff):
+        print_error(f"Invalid --diff target: '{args.diff}'. Must be a branch name, tag, or HEAD~N.")
         sys.exit(1)
 
     # Enforce minimum rounds

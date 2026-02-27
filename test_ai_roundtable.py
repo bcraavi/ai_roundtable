@@ -9,6 +9,7 @@ Run with:
 """
 
 import os
+import re
 import sys
 import tempfile
 import textwrap
@@ -902,6 +903,28 @@ class TestScanDiff(unittest.TestCase):
         self.assertIn("file_b.py", result)
 
 
+    @patch('ai_roundtable.subprocess.run')
+    def test_raises_on_bad_repo(self, mock_run):
+        """Non-git directory should raise RoundtableError."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        mock_run.return_value = MagicMock(returncode=128, stderr="fatal: not a git repository")
+        with self.assertRaises(RoundtableError) as ctx:
+            scan_diff(self.tmpdir, "HEAD")
+        self.assertIn("not a git repository", str(ctx.exception).lower())
+
+    @patch('ai_roundtable.subprocess.run')
+    def test_raises_on_diff_error(self, mock_run):
+        """git diff with bad ref should raise RoundtableError."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # git rev-parse
+            MagicMock(stdout="", stderr="fatal: bad revision 'nonexistent'", returncode=128),  # git diff
+        ]
+        with self.assertRaises(RoundtableError) as ctx:
+            scan_diff(self.tmpdir, "nonexistent")
+        self.assertIn("git diff failed", str(ctx.exception))
+
+
 class TestDiffModeOrchestrator(unittest.TestCase):
     """Integration test for diff mode in the orchestrator."""
 
@@ -940,6 +963,53 @@ class TestDiffModeOrchestrator(unittest.TestCase):
         result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
                                 output_file=output, diff_target="HEAD")
         self.assertEqual(result, "")
+
+
+class TestLogSanitization(unittest.TestCase):
+    """Tests for ANSI sanitization in persisted logs."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        Path(os.path.join(self.tmpdir, "main.py")).write_text("print('hello')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable.run_codex')
+    @patch('ai_roundtable.run_claude')
+    @patch('ai_roundtable.preflight_check')
+    def test_log_file_has_no_ansi(self, mock_preflight, mock_claude, mock_codex):
+        """Saved log files should not contain ANSI escape sequences."""
+        mock_claude.return_value = self._ok_result("\x1b[31mRed review text\x1b[0m")
+        mock_codex.return_value = self._ok_result("\x1b[32mGreen counter\x1b[0m")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+        content = Path(output).read_text(encoding='utf-8')
+        self.assertNotIn("\x1b", content)
+        self.assertIn("Red review text", content)
+        self.assertIn("Green counter", content)
+
+
+class TestDiffTargetValidation(unittest.TestCase):
+    """Tests for --diff target input validation."""
+
+    def test_valid_targets(self):
+        """These should all match the validation regex."""
+        valid = ["HEAD", "main", "HEAD~3", "feature/my-branch", "v1.0.0", "abc123"]
+        pattern = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.~^/\\-]*$')
+        for target in valid:
+            self.assertTrue(pattern.match(target), f"'{target}' should be valid")
+
+    def test_invalid_targets(self):
+        """These should be rejected by the validation regex."""
+        invalid = ["--output=evil", "-flag", "", "../escape"]
+        pattern = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.~^/\\-]*$')
+        for target in invalid:
+            self.assertIsNone(pattern.match(target), f"'{target}' should be invalid")
 
 
 if __name__ == "__main__":
