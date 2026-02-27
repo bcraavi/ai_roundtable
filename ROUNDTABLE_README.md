@@ -80,14 +80,14 @@ If your project is a git repo, consider adding `.roundtable/` to your `.gitignor
 
 ## Customizing CLI Commands
 
-If your CLI commands are different, edit the top of `ai_roundtable.py`:
+Set environment variables to override the default CLI commands:
 
-```python
-CLAUDE_CMD = "claude"                    # Change if different
-CODEX_CMD = "codex"                      # Change if different
-CLAUDE_FLAGS = ["-p"]                    # Claude print mode flags
-CODEX_FLAGS = ["--skip-git-repo-check"]  # Codex flags
+```bash
+export ROUNDTABLE_CLAUDE_CMD="/path/to/claude"
+export ROUNDTABLE_CODEX_CMD="/path/to/codex"
 ```
+
+Alternatively, edit the constants at the top of `ai_roundtable.py`.
 
 ## Running Tests
 
@@ -95,7 +95,7 @@ CODEX_FLAGS = ["--skip-git-repo-check"]  # Codex flags
 python3 -m unittest test_ai_roundtable -v
 ```
 
-115 tests cover the core logic: project scanning (source file ingestion, binary filtering, symlink protection), prompt building, history truncation, sentinel replacement, boundary sanitization, terminal output sanitization (ANSI/CSI/C0 controls), structured runner results, CLI streaming path (queue-based timeout, process cleanup), diff-mode scanning (git error paths, target validation), orchestrator integration (normal flow, error recovery, failure threading, dry-run, diff mode), security tests (_is_within_root, preflight_check), log sanitization, and scan early termination.
+120+ tests cover the core logic: project scanning (source file ingestion, binary filtering, symlink protection), prompt building, history truncation, sentinel replacement, boundary sanitization, terminal output sanitization (ANSI/CSI/C0 controls), structured runner results (bounded Popen reads, kill-on-cap, retry/backoff), CLI streaming path (queue-based timeout, process cleanup), diff-mode scanning (git error paths, target validation, file list capping), orchestrator integration (normal flow, error recovery, failure threading, retry, dry-run, diff mode), security tests (_is_within_root, preflight_check), log sanitization, and scan early termination.
 
 ## Tips
 

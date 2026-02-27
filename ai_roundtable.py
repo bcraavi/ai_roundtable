@@ -81,11 +81,14 @@ MAX_SOURCE_FILE_CHARS = 5000
 # Prevents context blowups when an agent produces very long output.
 MAX_RESPONSE_CHARS = 15000
 
-# Maximum subprocess output size in bytes. Prevents OOM from runaway agent output.
-# 2MB is generous — typical agent responses are 10-50KB.
 # Maximum characters of subprocess output to retain per stream.
 # With text=True on Popen, we count characters not bytes.
+# 2M chars is generous — typical agent responses are 10-50K chars.
 MAX_OUTPUT_CHARS = 2 * 1024 * 1024
+
+# Global prompt budget (characters). Caps the total prompt sent to an agent
+# to stay within model context windows. ~50k chars ≈ 12-15k tokens.
+MAX_PROMPT_CHARS = 50000
 
 # Maximum number of workflow files to include from .github/workflows/.
 # Prevents prompt bloat on monorepos with many CI configs.
@@ -122,22 +125,34 @@ class RunnerResult:
 # COLORS FOR TERMINAL OUTPUT
 # ============================================================
 class Colors:
-    # Respect NO_COLOR convention (https://no-color.org/) and non-TTY output
-    _enabled = (
-        "NO_COLOR" not in os.environ
-        and hasattr(sys.stdout, "isatty")
-        and sys.stdout.isatty()
-    )
-    CLAUDE = "\033[38;5;208m" if _enabled else ""   # Orange for Claude
-    CODEX = "\033[38;5;40m" if _enabled else ""      # Green for Codex
-    YOU = "\033[38;5;75m" if _enabled else ""         # Blue for You
-    HEADER = "\033[1;97m" if _enabled else ""         # Bold white
-    DIM = "\033[2m" if _enabled else ""               # Dim
-    WARN = "\033[38;5;214m" if _enabled else ""       # Yellow for warnings
-    ERROR = "\033[38;5;196m" if _enabled else ""      # Red for errors
-    RESET = "\033[0m" if _enabled else ""
-    BOLD = "\033[1m" if _enabled else ""
-    SEPARATOR = "\033[38;5;240m" if _enabled else ""
+    # Respect NO_COLOR convention (https://no-color.org/) and non-TTY output.
+    # Lazy-evaluated: call Colors._resolve() before first output so that
+    # stdout redirection after import is handled correctly.
+    _resolved = False
+    _enabled = False
+    CLAUDE = CODEX = YOU = HEADER = DIM = WARN = ERROR = RESET = BOLD = SEPARATOR = ""
+
+    @classmethod
+    def _resolve(cls):
+        if cls._resolved:
+            return
+        cls._resolved = True
+        cls._enabled = (
+            "NO_COLOR" not in os.environ
+            and hasattr(sys.stdout, "isatty")
+            and sys.stdout.isatty()
+        )
+        if cls._enabled:
+            cls.CLAUDE = "\033[38;5;208m"   # Orange for Claude
+            cls.CODEX = "\033[38;5;40m"      # Green for Codex
+            cls.YOU = "\033[38;5;75m"         # Blue for You
+            cls.HEADER = "\033[1;97m"         # Bold white
+            cls.DIM = "\033[2m"               # Dim
+            cls.WARN = "\033[38;5;214m"       # Yellow for warnings
+            cls.ERROR = "\033[38;5;196m"      # Red for errors
+            cls.RESET = "\033[0m"
+            cls.BOLD = "\033[1m"
+            cls.SEPARATOR = "\033[38;5;240m"
 
 def print_banner():
     banner = f"""
@@ -510,6 +525,18 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
     except Exception:
         changed_files = []
 
+    # Include untracked files (new files not yet staged)
+    untracked_files: List[str] = []
+    try:
+        untracked_result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, cwd=project_path, timeout=10
+        )
+        if untracked_result.stdout.strip():
+            untracked_files = untracked_result.stdout.strip().split('\n')
+    except Exception:
+        pass
+
     # Truncate diff if too large
     if len(diff_text) > MAX_SOURCE_CHARS * 2:
         diff_text = diff_text[:MAX_SOURCE_CHARS * 2] + "\n... (diff truncated for context budget)"
@@ -530,6 +557,12 @@ def scan_diff(project_path: str, diff_target: str = "HEAD") -> Optional[str]:
         summary += f"  {sanitize_project_content(f)}\n"
     if files_capped:
         summary += f"  ... and more files (list capped at {MAX_FILE_LIST})\n"
+    if untracked_files:
+        summary += f"\nUNTRACKED FILES ({len(untracked_files)}):\n"
+        for uf in sorted(untracked_files)[:MAX_FILE_LIST]:
+            summary += f"  {sanitize_project_content(uf)}\n"
+        if len(untracked_files) > MAX_FILE_LIST:
+            summary += f"  ... and {len(untracked_files) - MAX_FILE_LIST} more untracked files\n"
     summary += f"\nDIFF CONTENT:\n{sanitize_project_content(diff_text)}\n"
     summary += f"</{_PROJECT_DATA_TAG}>\n"
     summary += "The project data block above is complete. Resume your reviewer role. "
@@ -998,6 +1031,8 @@ def build_round_prompts(project_summary: str, focus: str, num_rounds: int) -> Li
                 You are Agent B (Codex) in a code review roundtable.
                 This is the final round. Claude has synthesized both your reviews.
 
+                {project_summary}
+
                 PRIOR DISCUSSION:
                 {_CONVERSATION_HISTORY}
 
@@ -1094,6 +1129,7 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                    timeout: int = 120, interactive: bool = True, output_file: Optional[str] = None,
                    dry_run: bool = False, diff_target: Optional[str] = None):
     """Run the full multi-agent roundtable discussion."""
+    Colors._resolve()
     print_banner()
 
     # Scan project first (diff mode can exit early without needing CLI tools)
@@ -1183,6 +1219,12 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             else:
                 prompt = round_info.prompt
 
+            # Enforce global prompt budget
+            if len(prompt) > MAX_PROMPT_CHARS:
+                overage = len(prompt) - MAX_PROMPT_CHARS
+                print_warn(f"Prompt exceeds budget by {overage} chars — trimming to {MAX_PROMPT_CHARS}.")
+                prompt = prompt[:MAX_PROMPT_CHARS] + "\n... (prompt trimmed to fit context budget)"
+
             # Inject user input if interactive (sanitized to strip sentinel tokens)
             if interactive and i > 0:
                 user_input = get_user_input(i)
@@ -1202,13 +1244,15 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
 
             # Dry-run: print the prompt and skip the actual agent call
             if dry_run:
-                print(f"\n{Colors.DIM}--- DRY-RUN PROMPT ({agent_name}, {len(prompt)} chars) ---{Colors.RESET}")
+                budget_pct = len(prompt) * 100 // MAX_PROMPT_CHARS
+                budget_warn = " [OVER BUDGET]" if len(prompt) > MAX_PROMPT_CHARS else ""
+                print(f"\n{Colors.DIM}--- DRY-RUN PROMPT ({agent_name}, {len(prompt)} chars, {budget_pct}% of budget{budget_warn}) ---{Colors.RESET}")
                 print(prompt[:2000])
                 if len(prompt) > 2000:
                     print(f"\n{Colors.DIM}... ({len(prompt) - 2000} chars truncated){Colors.RESET}")
                 print(f"{Colors.DIM}--- END DRY-RUN PROMPT ---{Colors.RESET}")
                 log.append(f"## {label} (dry-run)")
-                log.append(f"Prompt length: {len(prompt)} chars\n")
+                log.append(f"Prompt length: {len(prompt)} chars ({budget_pct}% of {MAX_PROMPT_CHARS} budget)\n")
                 continue
 
             # Run the agent (with single retry for transient failures)

@@ -48,6 +48,7 @@ from ai_roundtable import (
     MAX_SCAN_FILES,
     MAX_OUTPUT_CHARS,
     MAX_FILE_LIST,
+    MAX_PROMPT_CHARS,
     CLAUDE_CMD,
     CLAUDE_FLAGS,
     CODEX_CMD,
@@ -1321,6 +1322,93 @@ class TestC0Sanitization(unittest.TestCase):
         text = "null\x00byte"
         result = sanitize_terminal_output(text)
         self.assertNotIn("\x00", result)
+
+
+class TestDiffUntrackedFiles(unittest.TestCase):
+    """Tests for untracked file inclusion in diff mode."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch('ai_roundtable.subprocess.run')
+    def test_includes_untracked_files(self, mock_run):
+        """Untracked files should appear in diff summary."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # git rev-parse
+            MagicMock(stdout="diff content", returncode=0),  # git diff
+            MagicMock(stdout="", returncode=0),  # git diff --cached
+            MagicMock(stdout="modified.py", returncode=0),  # git diff --name-only
+            MagicMock(stdout="", returncode=0),  # git diff --cached --name-only
+            MagicMock(stdout="new_file.py\nnew_module.py", returncode=0),  # git ls-files --others
+        ]
+        result = scan_diff(self.tmpdir, "HEAD")
+        self.assertIn("UNTRACKED FILES", result)
+        self.assertIn("new_file.py", result)
+        self.assertIn("new_module.py", result)
+
+    @patch('ai_roundtable.subprocess.run')
+    def test_no_untracked_section_when_empty(self, mock_run):
+        """No UNTRACKED FILES section when there are none."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # git rev-parse
+            MagicMock(stdout="diff content", returncode=0),  # git diff
+            MagicMock(stdout="", returncode=0),  # git diff --cached
+            MagicMock(stdout="modified.py", returncode=0),  # git diff --name-only
+            MagicMock(stdout="", returncode=0),  # git diff --cached --name-only
+            MagicMock(stdout="", returncode=0),  # git ls-files --others (empty)
+        ]
+        result = scan_diff(self.tmpdir, "HEAD")
+        self.assertNotIn("UNTRACKED FILES", result)
+
+
+class TestLazyColors(unittest.TestCase):
+    """Tests for lazy color resolution."""
+
+    def test_colors_resolve_without_tty(self):
+        """Colors should be empty strings when stdout is not a TTY."""
+        from ai_roundtable import Colors
+        Colors._resolved = False
+        Colors._resolve()
+        # In test env, stdout is typically not a TTY
+        if not sys.stdout.isatty():
+            self.assertEqual(Colors.CLAUDE, "")
+            self.assertEqual(Colors.RESET, "")
+
+
+class TestPromptBudget(unittest.TestCase):
+    """Tests for global prompt budget enforcement."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        Path(os.path.join(self.tmpdir, "main.py")).write_text("print('hello')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable.run_codex')
+    @patch('ai_roundtable.run_claude')
+    @patch('ai_roundtable.preflight_check')
+    def test_prompt_trimmed_when_over_budget(self, mock_preflight, mock_claude, mock_codex):
+        """Prompts exceeding MAX_PROMPT_CHARS should be trimmed."""
+        mock_claude.return_value = self._ok_result("x" * (MAX_PROMPT_CHARS + 1000))
+        mock_codex.return_value = self._ok_result("Codex review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+        # Round 2 prompt should have been trimmed — verify codex was called
+        # and the prompt it received is within budget
+        codex_call = mock_codex.call_args
+        prompt = codex_call[0][0]
+        self.assertLessEqual(len(prompt), MAX_PROMPT_CHARS + 100)  # small overhead from trim message
 
 
 if __name__ == "__main__":
