@@ -9,6 +9,7 @@ Always-active web search integration that enriches every round prompt with:
 
 import json
 import re
+import threading
 import urllib.request
 import urllib.error
 from datetime import date
@@ -40,8 +41,9 @@ _PYPI_URL = "https://pypi.org/pypi/{}/json"
 _NPM_URL = "https://registry.npmjs.org/{}/latest"
 
 # Packages to check by detected tech
+# NOTE: No entry for "Python" — the PyPI "python" package is a placeholder,
+# not CPython. There is no reliable PyPI/npm API for CPython versions.
 _VERSION_CHECKS: Dict[str, List[tuple]] = {
-    "Python": [("python", "pypi")],
     "React": [("react", "npm")],
     "Next.js": [("next", "npm")],
     "TypeScript": [("typescript", "npm")],
@@ -51,7 +53,8 @@ _VERSION_CHECKS: Dict[str, List[tuple]] = {
     "FastAPI": [("fastapi", "pypi")],
 }
 
-_FETCH_TIMEOUT = 5  # seconds — best-effort, don't block the review
+_FETCH_TIMEOUT = 5   # seconds per request — best-effort, don't block the review
+_FETCH_DEADLINE = 8  # seconds total wall-clock cap for all parallel fetches
 
 
 def detect_tech_stack(project_summary: str) -> List[str]:
@@ -84,14 +87,39 @@ def _fetch_latest_version(package: str, registry: str) -> Optional[str]:
 
 
 def _fetch_versions(tech_stack: List[str]) -> Dict[str, str]:
-    """Fetch latest versions for detected technologies. Best-effort, no failures."""
-    versions = {}
+    """Fetch latest versions for detected technologies in parallel.
+
+    Spawns one thread per package lookup and joins them all under a
+    global wall-clock deadline (_FETCH_DEADLINE) so total latency is
+    bounded regardless of how many packages are detected.
+    Best-effort — network failures are silently ignored.
+    """
+    # Collect all (package, registry) pairs to fetch
+    to_fetch: List[tuple] = []
     for tech in tech_stack:
-        checks = _VERSION_CHECKS.get(tech, [])
-        for package, registry in checks:
-            ver = _fetch_latest_version(package, registry)
-            if ver:
+        to_fetch.extend(_VERSION_CHECKS.get(tech, []))
+    if not to_fetch:
+        return {}
+
+    versions: Dict[str, str] = {}
+    lock = threading.Lock()
+
+    def _worker(package: str, registry: str) -> None:
+        ver = _fetch_latest_version(package, registry)
+        if ver:
+            with lock:
                 versions[package] = ver
+
+    threads: List[threading.Thread] = []
+    for package, registry in to_fetch:
+        t = threading.Thread(target=_worker, args=(package, registry), daemon=True)
+        t.start()
+        threads.append(t)
+
+    # Join with global deadline — don't wait forever for stragglers
+    for t in threads:
+        t.join(timeout=_FETCH_DEADLINE)
+
     return versions
 
 
@@ -99,7 +127,7 @@ def get_web_search_instruction(agent: str) -> str:
     """Return agent-specific web search instructions.
 
     Claude has WebSearch/WebFetch tools built in.
-    Codex uses the --search flag (added to CODEX_FLAGS).
+    Codex is instructed to use its web search capabilities via the prompt.
     """
     today = date.today().isoformat()
 

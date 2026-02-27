@@ -1,6 +1,7 @@
 """Tests for web context — tech stack detection, search instructions, and context building."""
 
 import unittest
+import threading
 from unittest.mock import patch, MagicMock
 from datetime import date
 
@@ -9,6 +10,8 @@ from ai_roundtable._web_context import (
     get_web_search_instruction,
     build_web_context,
     _fetch_latest_version,
+    _fetch_versions,
+    _VERSION_CHECKS,
 )
 
 
@@ -91,10 +94,11 @@ class TestBuildWebContext(unittest.TestCase):
 
     @patch('ai_roundtable._web_context._fetch_latest_version')
     def test_includes_versions_when_available(self, mock_fetch):
-        mock_fetch.return_value = "3.12.0"
-        summary = "FILE TREE:\n  requirements.txt\n  main.py"
+        mock_fetch.return_value = "5.1.0"
+        # Use a Django project so _VERSION_CHECKS has a match (Django → pypi)
+        summary = "FILE TREE:\n  manage.py\n  requirements.txt\n  main.py"
         context = build_web_context(summary)
-        self.assertIn("3.12.0", context)
+        self.assertIn("5.1.0", context)
 
     @patch('ai_roundtable._web_context._fetch_latest_version')
     def test_handles_fetch_failure_gracefully(self, mock_fetch):
@@ -108,6 +112,58 @@ class TestBuildWebContext(unittest.TestCase):
         with patch('ai_roundtable._web_context._fetch_latest_version', return_value=None):
             context = build_web_context("empty project")
         self.assertIn("No specific tech stack detected", context)
+
+
+class TestVersionChecks(unittest.TestCase):
+    """Tests for _VERSION_CHECKS correctness."""
+
+    def test_python_not_in_version_checks(self):
+        """PyPI 'python' package is not CPython — must not be looked up."""
+        self.assertNotIn("Python", _VERSION_CHECKS)
+
+
+class TestFetchVersionsParallel(unittest.TestCase):
+    """Tests for parallel version fetching."""
+
+    @patch('ai_roundtable._web_context._fetch_latest_version')
+    def test_fetches_in_parallel(self, mock_fetch):
+        """Multiple packages should be fetched concurrently, not sequentially."""
+        call_threads = []
+
+        def _record_thread(package, registry):
+            call_threads.append(threading.current_thread().name)
+            return "1.0.0"
+
+        mock_fetch.side_effect = _record_thread
+        versions = _fetch_versions(["React", "Django", "Flask"])
+        # Should have fetched react, django, flask
+        self.assertEqual(len(versions), 3)
+        self.assertIn("react", versions)
+        self.assertIn("django", versions)
+        self.assertIn("flask", versions)
+
+    @patch('ai_roundtable._web_context._fetch_latest_version')
+    def test_empty_tech_stack_returns_empty(self, mock_fetch):
+        versions = _fetch_versions([])
+        self.assertEqual(versions, {})
+        mock_fetch.assert_not_called()
+
+    @patch('ai_roundtable._web_context._fetch_latest_version')
+    def test_unknown_tech_returns_empty(self, mock_fetch):
+        versions = _fetch_versions(["UnknownLang"])
+        self.assertEqual(versions, {})
+        mock_fetch.assert_not_called()
+
+    @patch('ai_roundtable._web_context._fetch_latest_version')
+    def test_partial_failures_still_returns_successes(self, mock_fetch):
+        def _selective(package, registry):
+            if package == "react":
+                return "19.0.0"
+            return None
+
+        mock_fetch.side_effect = _selective
+        versions = _fetch_versions(["React", "Django"])
+        self.assertEqual(versions, {"react": "19.0.0"})
 
 
 class TestFetchLatestVersion(unittest.TestCase):
