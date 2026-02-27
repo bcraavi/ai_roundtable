@@ -1,6 +1,6 @@
 [project]
 name = "ai-roundtable"
-version = "0.5.0"
+dynamic = ["version"]
 description = "Multi-agent project review tool — Claude CLI and Codex CLI debate your code"
 readme = "ROUNDTABLE_README.md"
 license = {text = "MIT"}
@@ -31,3 +31,6 @@ Repository = "https://github.com/banvithchowdaryravi/ai_roundtable"
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "ai_roundtable.__version__"}

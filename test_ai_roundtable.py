@@ -46,7 +46,8 @@ from ai_roundtable import (
     MAX_HISTORY_CHARS,
     MAX_WORKFLOW_FILES,
     MAX_SCAN_FILES,
-    MAX_OUTPUT_BYTES,
+    MAX_OUTPUT_CHARS,
+    MAX_FILE_LIST,
     CLAUDE_CMD,
     CLAUDE_FLAGS,
     CODEX_CMD,
@@ -498,12 +499,22 @@ class TestCLIRunners(unittest.TestCase):
 
     @patch('ai_roundtable.subprocess.Popen')
     def test_nonstream_output_bounded(self, mock_popen):
-        """Non-stream Popen path should enforce MAX_OUTPUT_BYTES during read."""
-        huge_output = "x" * (MAX_OUTPUT_BYTES + 10000)
+        """Non-stream Popen path should enforce MAX_OUTPUT_CHARS during read."""
+        huge_output = "x" * (MAX_OUTPUT_CHARS + 10000)
         mock_popen.return_value = self._mock_popen_proc(stdout=huge_output)
         result = run_claude("prompt", "/tmp/project")
         self.assertTrue(result.ok)
-        self.assertLessEqual(len(result.output), MAX_OUTPUT_BYTES)
+        self.assertLessEqual(len(result.output), MAX_OUTPUT_CHARS)
+
+    @patch('ai_roundtable.subprocess.Popen')
+    def test_nonstream_kills_on_cap(self, mock_popen):
+        """Process should be killed when output exceeds cap to prevent pipe deadlock."""
+        huge_output = "x" * (MAX_OUTPUT_CHARS + 10000)
+        proc = self._mock_popen_proc(stdout=huge_output)
+        proc.poll.return_value = None  # process still running
+        mock_popen.return_value = proc
+        result = run_claude("prompt", "/tmp/project")
+        proc.kill.assert_called()
 
 
 class TestSaveLog(unittest.TestCase):
@@ -1005,6 +1016,23 @@ class TestScanDiff(unittest.TestCase):
         with self.assertRaises(RoundtableError) as ctx:
             scan_diff(self.tmpdir, "nonexistent")
         self.assertIn("git diff failed", str(ctx.exception))
+
+    @patch('ai_roundtable.subprocess.run')
+    def test_caps_changed_file_list(self, mock_run):
+        """Changed file list should be capped at MAX_FILE_LIST."""
+        os.makedirs(self.tmpdir, exist_ok=True)
+        many_files = "\n".join(f"file_{i:04d}.py" for i in range(MAX_FILE_LIST + 50))
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # git rev-parse
+            MagicMock(stdout="diff content", returncode=0),  # git diff branch
+            MagicMock(stdout=many_files, returncode=0),  # git diff --name-only branch
+        ]
+        result = scan_diff(self.tmpdir, "main")
+        self.assertIn("capped", result)
+        # Count listed files (lines starting with two spaces in CHANGED FILES section)
+        lines = result.split('\n')
+        file_lines = [l for l in lines if l.startswith('  file_')]
+        self.assertLessEqual(len(file_lines), MAX_FILE_LIST)
 
 
 class TestDiffModeOrchestrator(unittest.TestCase):
