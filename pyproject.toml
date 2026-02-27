@@ -1,0 +1,33 @@
+[project]
+name = "ai-roundtable"
+version = "0.4.0"
+description = "Multi-agent project review tool — Claude CLI and Codex CLI debate your code"
+readme = "ROUNDTABLE_README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [{name = "Banvith Chowdary Ravi"}]
+keywords = ["ai", "code-review", "multi-agent", "claude", "codex", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.scripts]
+ai-roundtable = "ai_roundtable:main"
+
+[project.urls]
+Repository = "https://github.com/banvithchowdaryravi/ai_roundtable"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
