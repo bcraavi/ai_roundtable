@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from typing import Optional, List
 
@@ -31,19 +32,31 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
     try:
         if stream and sys.stdout.isatty():
             return _run_cli_streaming(cmd, prompt, project_path, timeout, agent_name, env)
-        # Non-streaming: bounded Popen reads (prevents OOM from runaway output)
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=project_path,
-            env=env,
-        )
+        # Non-streaming: bounded Popen reads (prevents OOM from runaway output).
+        # Use temp file for stdin to avoid pipe buffer issues with large prompts
+        # (see https://github.com/anthropics/claude-code/issues/7263).
+        prompt_fd, prompt_path = tempfile.mkstemp(suffix='.txt', prefix='rt_prompt_')
         try:
-            proc.stdin.write(prompt)
-            proc.stdin.close()
+            with os.fdopen(prompt_fd, 'w') as f:
+                f.write(prompt)
+            with open(prompt_path, 'r') as prompt_file:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=prompt_file,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=project_path,
+                    env=env,
+                )
+        except Exception:
+            try:
+                os.unlink(prompt_path)
+            except OSError:
+                pass
+            raise
+        try:
+            os.unlink(prompt_path)
         except OSError:
             pass
 
@@ -97,8 +110,8 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
                 except OSError:
                     pass
 
-        out_t.join(timeout=2 if timed_out else 10)
-        err_t.join(timeout=2 if timed_out else 10)
+        out_t.join(timeout=2 if timed_out else 30)
+        err_t.join(timeout=2 if timed_out else 30)
 
         # Cleanup pipes
         for pipe in (proc.stdout, proc.stderr):
@@ -125,8 +138,10 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
                 )
             print_warn(f"{agent_name} CLI exited with code {proc.returncode} but produced output; using it.")
         if not stdout:
-            return RunnerResult(ok=False, output=f"No response from {agent_name}",
-                                exit_code=proc.returncode, error_type="exit_error")
+            err_detail = f": {stderr[:200]}" if stderr else ""
+            etype = "empty_response" if (proc.returncode or 0) == 0 else "exit_error"
+            return RunnerResult(ok=False, output=f"No response from {agent_name}{err_detail}",
+                                exit_code=proc.returncode, error_type=etype)
         return RunnerResult(ok=True, output=stdout, exit_code=proc.returncode, error_type=None)
     except FileNotFoundError:
         return RunnerResult(ok=False, output=f"'{cmd[0]}' not found. Is {agent_name} CLI installed and in PATH?",
@@ -148,18 +163,31 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
     """
     proc = None
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=project_path,
-            env=env,
-        )
-        # Send prompt and close stdin
-        proc.stdin.write(prompt)
-        proc.stdin.close()
+        # Use temp file for stdin to avoid pipe buffer issues with large prompts
+        prompt_fd, prompt_path = tempfile.mkstemp(suffix='.txt', prefix='rt_prompt_')
+        try:
+            with os.fdopen(prompt_fd, 'w') as f:
+                f.write(prompt)
+            with open(prompt_path, 'r') as prompt_file:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=prompt_file,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=project_path,
+                    env=env,
+                )
+        except Exception:
+            try:
+                os.unlink(prompt_path)
+            except OSError:
+                pass
+            raise
+        try:
+            os.unlink(prompt_path)
+        except OSError:
+            pass
 
         # Queue-based stdout reader thread — enables deadline-aware timeout.
         # Uses chunk-based reads (read(4096)) instead of line iteration to
@@ -252,8 +280,8 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
             return RunnerResult(ok=False, output=f"{agent_name} CLI timed out — try increasing --timeout",
                                 exit_code=None, error_type="timeout")
 
-        stdout_thread.join(timeout=10)
-        stderr_thread.join(timeout=10)
+        stdout_thread.join(timeout=30)
+        stderr_thread.join(timeout=30)
         stderr = "".join(stderr_chunks)
 
         proc.wait(timeout=10)
@@ -267,8 +295,10 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
                 return RunnerResult(ok=False, output=f"{agent_name} exited with code {returncode}: {stderr.strip() or 'No output'}",
                                     exit_code=returncode, error_type="exit_error")
         if not stdout:
-            return RunnerResult(ok=False, output=f"No response from {agent_name}",
-                                exit_code=returncode, error_type="exit_error")
+            err_detail = f": {stderr.strip()[:200]}" if stderr.strip() else ""
+            etype = "empty_response" if returncode == 0 else "exit_error"
+            return RunnerResult(ok=False, output=f"No response from {agent_name}{err_detail}",
+                                exit_code=returncode, error_type=etype)
         return RunnerResult(ok=True, output=stdout, exit_code=returncode, error_type=None)
     except FileNotFoundError:
         return RunnerResult(ok=False, output=f"'{cmd[0]}' not found. Is {agent_name} CLI installed and in PATH?",
@@ -305,6 +335,7 @@ def run_claude(prompt: str, project_path: str, timeout: int = 120,
     # Removing it allows nested claude CLI invocations (e.g., when this
     # tool is launched from within a Claude Code terminal).
     env.pop("CLAUDECODE", None)
+    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
     return _run_cli(cmd, prompt, project_path, timeout, "Claude", env=env, stream=True)
 
 

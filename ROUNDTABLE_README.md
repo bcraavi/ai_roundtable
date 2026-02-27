@@ -1,108 +1,83 @@
-# AI Roundtable — Multi-Agent Project Discussion
+# AI Roundtable
 
-Have Claude CLI and Codex CLI review your project together in a structured debate, with you jumping in to steer the conversation.
+Two AI agents (Claude CLI + Codex CLI) review your project in a structured debate. You run one command, they do the rest.
 
-## Prerequisites
+## Requirements
 
-- **Claude CLI** installed and authenticated (`claude` command works)
-- **Codex CLI** installed and authenticated (`codex` command works)
-- **Python 3.9+**
+- Python 3.9+
+- [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- [Codex CLI](https://github.com/openai/codex) installed and authenticated
 
-Both tools are verified at startup — the script will fail fast with a clear message if either is missing.
-
-## Quick Start
+## Install
 
 ```bash
-# Install as a CLI tool
 pip install .
+```
 
-# Basic usage — full comprehensive review
+## Usage
+
+```bash
+# Review a project (that's it)
 ai-roundtable /path/to/your/project
 
-# Focus on architecture only
-ai-roundtable /path/to/your/project --focus architecture
-
-# More rounds for deeper discussion
-ai-roundtable /path/to/your/project --rounds 6
-
-# Fewer rounds for a quick back-and-forth
-ai-roundtable /path/to/your/project --rounds 2
-
-# Non-interactive mode (no pauses for your input)
-ai-roundtable /path/to/your/project --no-interactive
-
-# Longer timeout for large projects
-ai-roundtable /path/to/your/project --timeout 180
-
-# Save output to a specific file
-ai-roundtable /path/to/your/project --output review.md
-
-# Dry run — see generated prompts without calling any CLIs
-ai-roundtable /path/to/your/project --dry-run
-
-# Or run as a module without installing
+# Or without installing
 python3 -m ai_roundtable /path/to/your/project
 ```
 
-## How It Works
+### Options
 
-The script runs a structured **4-round discussion** (configurable, minimum 2):
+| Flag | What it does | Default |
+|------|-------------|---------|
+| `--focus AREA` | `all`, `architecture`, `code_quality`, `performance`, `security` | `all` |
+| `--rounds N` | Number of debate rounds (min 2, even recommended) | `4` |
+| `--timeout N` | Seconds per agent call | `120` |
+| `--no-interactive` | Skip user input between rounds | off |
+| `--diff [TARGET]` | Review only changed files (vs HEAD, branch, or HEAD~N) | off |
+| `--output FILE` | Save discussion to a specific file | auto |
+| `--dry-run` | Show prompts without calling agents | off |
 
-| Round | Agent  | Purpose |
-|-------|--------|---------|
-| 1     | Claude | Opens with a thorough initial review |
-| 2     | Codex  | Challenges Claude, adds missed issues |
-| 3     | Claude | Rebuts, concedes, synthesizes both views |
-| 4     | Codex  | Final verdict with scores and priorities |
+### Examples
 
-Between each round, **you can jump in** to ask questions, redirect the discussion, or add context the agents might be missing. Your directives are preserved in the conversation history so later rounds remember your guidance.
+```bash
+# Quick 2-round review focused on security
+ai-roundtable ./my-app --focus security --rounds 2
 
-Each agent receives a rolling conversation history (budget-limited, anchor-and-recency strategy) so context is preserved across all rounds — Round 1's foundational analysis is always kept even when middle rounds are truncated.
+# Deep architecture review, no interruptions
+ai-roundtable ./my-app --focus architecture --rounds 6 --no-interactive
 
-**Round count notes:** Use even values for a balanced debate ending with Codex's scoring. Odd values mean the last round is always Claude (no Codex final verdict).
+# Review only your uncommitted changes
+ai-roundtable ./my-app --diff
 
-## Focus Areas
+# Review changes vs main branch
+ai-roundtable ./my-app --diff main
 
-| Flag | What It Covers |
-|------|----------------|
-| `--focus all` | Everything (default) |
-| `--focus architecture` | Design patterns, scalability, modularity |
-| `--focus code_quality` | Bugs, tech debt, naming, DRY |
-| `--focus performance` | Speed, memory, bundle size, rendering |
-| `--focus security` | Auth, injection, secrets, CORS |
+# Large project, give agents more time
+ai-roundtable ./my-app --timeout 300
+```
+
+## What happens when you run it
+
+1. Scans your project files
+2. Claude CLI gives an opening review
+3. Codex CLI challenges Claude and adds what was missed
+4. They go back and forth for the configured number of rounds
+5. Discussion is saved to `.roundtable/` in your project
+
+In interactive mode (default), you can steer the conversation between rounds.
 
 ## Output
 
-The full discussion is saved as a Markdown file in a `.roundtable/` subdirectory of your project:
-`.roundtable/roundtable_YYYYMMDD_HHMMSS.md`
+Discussion logs are saved to `.roundtable/roundtable_YYYYMMDD_HHMMSS_XXXX.md` in your project directory. Ctrl+C saves partial progress.
 
-If you hit Ctrl+C during a run, the partial discussion is saved automatically.
-
-If your project is a git repo, consider adding `.roundtable/` to your `.gitignore`.
-
-## Customizing CLI Commands
-
-Set environment variables to override the default CLI commands:
+## Custom CLI paths
 
 ```bash
 export ROUNDTABLE_CLAUDE_CMD="/path/to/claude"
 export ROUNDTABLE_CODEX_CMD="/path/to/codex"
 ```
 
-Alternatively, edit the constants in `ai_roundtable/_constants.py`.
-
-## Running Tests
+## Tests
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
-
-140+ tests across 13 per-module test files cover: project scanning (source file ingestion, binary filtering, symlink protection), prompt building, history truncation, sentinel replacement, boundary sanitization, terminal output sanitization (ANSI/CSI/C0 controls), structured runner results (bounded Popen reads, kill-on-cap, retry/backoff), CLI streaming path (queue-based timeout, process cleanup), diff-mode scanning (git error paths, target validation, file list capping), orchestrator integration (normal flow, error recovery, failure threading, retry, dry-run, diff mode), security tests (_is_within_root, preflight_check), log sanitization, scan early termination, and web context (tech stack detection, version lookup, search instructions).
-
-## Tips
-
-- Start with `--focus architecture` for the most strategic insights
-- Use 6+ rounds if you want the agents to really dig in
-- Use `--rounds 2` for a quick review + counter-review
-- Jump in during interactive mode to ask "what about testing?" or "focus on the auth flow"
-- The saved Markdown log makes a great reference for sprint planning

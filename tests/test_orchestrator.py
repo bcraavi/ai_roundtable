@@ -160,6 +160,23 @@ class TestOrchestratorIntegration(unittest.TestCase):
     @patch('ai_roundtable._orchestrator.run_codex')
     @patch('ai_roundtable._orchestrator.run_claude')
     @patch('ai_roundtable._orchestrator.preflight_check')
+    def test_retry_on_empty_response(self, mock_preflight, mock_claude, mock_codex, mock_sleep):
+        """Empty response (exit 0, no output) should trigger a single retry."""
+        empty_result = RunnerResult(ok=False, output="No response from Claude",
+                                    exit_code=0, error_type="empty_response")
+        ok_result = self._ok_result("Claude review after retry")
+        mock_claude.side_effect = [empty_result, ok_result]
+        mock_codex.return_value = self._ok_result("Codex review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+        self.assertIn("Claude review after retry", result)
+        self.assertEqual(mock_claude.call_count, 2)
+        mock_sleep.assert_called_once_with(5)
+
+    @patch('ai_roundtable._orchestrator.time.sleep')
+    @patch('ai_roundtable._orchestrator.run_codex')
+    @patch('ai_roundtable._orchestrator.run_claude')
+    @patch('ai_roundtable._orchestrator.preflight_check')
     def test_no_retry_on_exit_error(self, mock_preflight, mock_claude, mock_codex, mock_sleep):
         """Exit errors should NOT trigger retry (only timeout/exception do)."""
         mock_claude.side_effect = [

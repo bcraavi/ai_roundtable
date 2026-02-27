@@ -154,6 +154,36 @@ class TestCLIRunners(unittest.TestCase):
         self.assertLessEqual(len(result.output), MAX_OUTPUT_CHARS)
 
     @patch('ai_roundtable._runners.subprocess.Popen')
+    def test_run_claude_empty_response_exit0(self, mock_popen):
+        """Exit code 0 with empty stdout should return empty_response error type."""
+        mock_popen.return_value = self._mock_popen_proc(stdout="", returncode=0)
+        result = run_claude("prompt", "/tmp/project")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_type, "empty_response")
+        self.assertIn("No response", result.output)
+
+    @patch('ai_roundtable._runners.subprocess.Popen')
+    def test_run_claude_strips_claude_code_entrypoint_env(self, mock_popen):
+        """CLAUDE_CODE_ENTRYPOINT should be removed from env to allow nesting."""
+        mock_popen.return_value = self._mock_popen_proc()
+        with patch.dict(os.environ, {"CLAUDE_CODE_ENTRYPOINT": "cli"}):
+            run_claude("prompt", "/tmp/project")
+        call_kwargs = mock_popen.call_args[1]
+        env = call_kwargs.get('env')
+        self.assertIsNotNone(env)
+        self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", env)
+
+    @patch('ai_roundtable._runners.subprocess.Popen')
+    def test_run_claude_uses_file_stdin(self, mock_popen):
+        """Claude runner should pass a file object (not PIPE) as stdin."""
+        mock_popen.return_value = self._mock_popen_proc()
+        run_claude("test prompt", "/tmp/project")
+        call_kwargs = mock_popen.call_args[1]
+        # stdin should NOT be subprocess.PIPE when using file-based delivery
+        import subprocess
+        self.assertNotEqual(call_kwargs.get('stdin'), subprocess.PIPE)
+
+    @patch('ai_roundtable._runners.subprocess.Popen')
     def test_nonstream_kills_on_cap(self, mock_popen):
         """Process should be killed when output exceeds cap to prevent pipe deadlock."""
         huge_output = "x" * (MAX_OUTPUT_CHARS + 10000)
@@ -206,7 +236,7 @@ class TestRunCliStreaming(unittest.TestCase):
     @patch('ai_roundtable._runners.subprocess.Popen')
     @patch('ai_roundtable._runners.sys.stdout')
     def test_streaming_no_output(self, mock_stdout_stream, mock_popen):
-        """Empty output should return error."""
+        """Empty output with exit code 0 should return empty_response error."""
         proc = self._make_mock_proc([])
         mock_popen.return_value = proc
         mock_stdout_stream.isatty.return_value = True
@@ -214,7 +244,7 @@ class TestRunCliStreaming(unittest.TestCase):
             ["test-cmd"], "prompt", "/tmp", timeout=30, agent_name="TestAgent"
         )
         self.assertFalse(result.ok)
-        self.assertEqual(result.error_type, "exit_error")
+        self.assertEqual(result.error_type, "empty_response")
 
     @patch('ai_roundtable._runners.subprocess.Popen')
     @patch('ai_roundtable._runners.sys.stdout')

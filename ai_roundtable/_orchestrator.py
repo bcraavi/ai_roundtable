@@ -196,7 +196,7 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             result = _call_agent(timeout)
 
             # Retry once for transient failures (timeout, exception)
-            if not result.ok and result.error_type in ("timeout", "exception"):
+            if not result.ok and result.error_type in ("timeout", "exception", "empty_response"):
                 retry_timeout = min(timeout * 2, 600)
                 backoff = 5
                 print_warn(f"{agent_name} failed ({result.error_type}). Retrying in {backoff}s with {retry_timeout}s timeout...")
