@@ -27,6 +27,11 @@ from datetime import datetime
 from pathlib import Path
 
 # ============================================================
+# VERSION (single source of truth)
+# ============================================================
+__version__ = "0.5.0"
+
+# ============================================================
 # CONFIGURATION — Adjust CLI commands if needed
 # ============================================================
 CLAUDE_CMD = os.environ.get("ROUNDTABLE_CLAUDE_CMD", "claude")
@@ -975,11 +980,7 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     """Run the full multi-agent roundtable discussion."""
     print_banner()
 
-    # Preflight: verify CLI tools are available (skip in dry-run mode)
-    if not dry_run:
-        preflight_check()
-
-    # Scan project (diff mode or full scan)
+    # Scan project first (diff mode can exit early without needing CLI tools)
     if diff_target is not None:
         print(f"{Colors.DIM}Scanning diff at: {project_path} (target: {diff_target}){Colors.RESET}")
         project_summary = scan_diff(project_path, diff_target)
@@ -991,6 +992,11 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
         print(f"{Colors.DIM}Scanning project at: {project_path}{Colors.RESET}")
         project_summary = scan_project(project_path)
         print(f"{Colors.DIM}Found project files. Starting discussion...{Colors.RESET}")
+
+    # Preflight: verify CLI tools are available (skip in dry-run mode)
+    if not dry_run:
+        preflight_check()
+
     print_separator()
 
     # Build prompts
@@ -1006,8 +1012,10 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             output_dir = os.path.join(tempfile.gettempdir(), "ai_roundtable")
             os.makedirs(output_dir, exist_ok=True)
             print_warn(f"Cannot write to project directory. Saving to: {output_dir}")
+        import random
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_file = os.path.join(output_dir, f"roundtable_{timestamp}.md")
+        suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=4))
+        output_file = os.path.join(output_dir, f"roundtable_{timestamp}_{suffix}.md")
 
     # Discussion log
     log = []
@@ -1089,18 +1097,24 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                 continue
 
             # Run the agent
+            import time as _time
             print(f"{Colors.DIM}Waiting for {agent_name}...{Colors.RESET}")
+            round_start = _time.monotonic()
 
             if agent == "claude":
                 result = run_claude(prompt, project_path, timeout)
             else:
                 result = run_codex(prompt, project_path, timeout)
 
+            elapsed = _time.monotonic() - round_start
+            elapsed_str = f"{elapsed:.1f}s"
+            print(f"{Colors.DIM}  ({agent_name} responded in {elapsed_str}){Colors.RESET}")
+
             # Check for error responses — thread failure context so next agent is aware
             if not result.ok:
                 failure_msg = f"[AGENT FAILED: {result.error_type} — {result.output[:200]}]"
                 print_error(f"{agent_name} failed this round: {result.output}")
-                log.append(f"## {label}")
+                log.append(f"## {label} ({elapsed_str})")
                 log.append(f"**[AGENT ERROR]** {result.output}\n")
                 # Update previous_response so the next round's __PREV_RESPONSE__ reflects the failure
                 previous_response = failure_msg
@@ -1125,7 +1139,7 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             })
 
             # Log (sanitize ANSI before persisting to markdown)
-            log.append(f"## {label}")
+            log.append(f"## {label} ({elapsed_str})")
             log.append(f"{sanitize_terminal_output(response)}\n")
 
     except KeyboardInterrupt:
@@ -1176,7 +1190,7 @@ def main():
     parser.add_argument("--diff", type=str, nargs="?", const="HEAD", default=None,
                         metavar="TARGET",
                         help="Review only changed files (diff mode). TARGET can be HEAD (default), a branch name, or HEAD~N.")
-    parser.add_argument("--version", action="version", version="%(prog)s 0.5.0")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
 
