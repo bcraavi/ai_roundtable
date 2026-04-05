@@ -24,10 +24,12 @@ from ._constants import (
     CODEX_FLAGS,
     MAX_HISTORY_CHARS,
     MAX_SCAN_DEPTH,
+    MONOREPO_SCAN_DEPTH,
     MAX_FILE_LIST,
     MAX_SCAN_FILES,
     MAX_CONFIG_FILE_CHARS,
     MAX_SOURCE_CHARS,
+    MONOREPO_SOURCE_CHARS,
     MAX_SOURCE_FILE_CHARS,
     MAX_RESPONSE_CHARS,
     MAX_OUTPUT_CHARS,
@@ -35,6 +37,12 @@ from ._constants import (
     MAX_WORKFLOW_FILES,
     COMPACT_MAX_RESPONSE_CHARS,
     COMPACT_MAX_HISTORY_CHARS,
+    AUTO_TIMEOUT_FILE_THRESHOLD,
+    AUTO_TIMEOUT_CHAR_THRESHOLD,
+    AUTO_TIMEOUT_SMALL,
+    AUTO_TIMEOUT_LARGE,
+    AGENT_TIMEOUT_MULTIPLIERS,
+    INTERACTIVE_AUTO_CONTINUE_SECONDS,
 )
 
 # Private constants — imported for backward compatibility and test access
@@ -51,6 +59,7 @@ from ._types import (
     RuntimeConfig,
     RunnerResult,
     Round,
+    ScanStats,
 )
 
 from ._protocols import (
@@ -136,13 +145,18 @@ __all__ = [
     "__version__",
     "CLAUDE_CMD", "CODEX_CMD", "CODEX_SUBCMD",
     "CLAUDE_FLAGS", "CODEX_FLAGS",
-    "MAX_HISTORY_CHARS", "MAX_SCAN_DEPTH", "MAX_FILE_LIST", "MAX_SCAN_FILES",
-    "MAX_CONFIG_FILE_CHARS", "MAX_SOURCE_CHARS", "MAX_SOURCE_FILE_CHARS",
+    "MAX_HISTORY_CHARS", "MAX_SCAN_DEPTH", "MONOREPO_SCAN_DEPTH",
+    "MAX_FILE_LIST", "MAX_SCAN_FILES",
+    "MAX_CONFIG_FILE_CHARS", "MAX_SOURCE_CHARS", "MONOREPO_SOURCE_CHARS",
+    "MAX_SOURCE_FILE_CHARS",
     "MAX_RESPONSE_CHARS", "MAX_OUTPUT_CHARS", "MAX_PROMPT_CHARS",
     "MAX_WORKFLOW_FILES",
     "COMPACT_MAX_RESPONSE_CHARS", "COMPACT_MAX_HISTORY_CHARS",
+    "AUTO_TIMEOUT_FILE_THRESHOLD", "AUTO_TIMEOUT_CHAR_THRESHOLD",
+    "AUTO_TIMEOUT_SMALL", "AUTO_TIMEOUT_LARGE",
+    "AGENT_TIMEOUT_MULTIPLIERS", "INTERACTIVE_AUTO_CONTINUE_SECONDS",
     # Types
-    "RoundtableError", "RuntimeConfig", "RunnerResult", "Round",
+    "RoundtableError", "RuntimeConfig", "RunnerResult", "Round", "ScanStats",
     # Protocols
     "AgentRunner", "ProjectScanner", "WebContextProvider",
     # Sanitize (public)

@@ -27,6 +27,15 @@ class RunnerResult:
     error_type: Optional[str]     # None, "timeout", "not_found", "exit_error", "empty_response", "exception"
 
 
+@dataclass(frozen=True)
+class ScanStats:
+    """Metadata from project scanning, used for auto-tuning."""
+    total_files: int        # Number of files found during scan
+    source_chars: int       # Total characters of source code scanned
+    is_monorepo: bool       # Whether the project was detected as a monorepo
+    services: tuple         # Tuple of detected service directory names
+
+
 @dataclass
 class Round:
     """A single round in the roundtable discussion."""

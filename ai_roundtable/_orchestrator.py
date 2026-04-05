@@ -17,6 +17,8 @@ from ._constants import (
     MAX_HISTORY_CHARS,
     COMPACT_MAX_RESPONSE_CHARS, COMPACT_MAX_HISTORY_CHARS,
     _PREV_RESPONSE, _CONVERSATION_HISTORY,
+    AUTO_TIMEOUT_FILE_THRESHOLD, AUTO_TIMEOUT_CHAR_THRESHOLD,
+    AUTO_TIMEOUT_LARGE, AGENT_TIMEOUT_MULTIPLIERS,
 )
 from ._types import RoundtableError
 from ._colors import Colors, print_banner, print_separator, print_agent, print_warn, print_error
@@ -31,6 +33,23 @@ from ._web_context import build_web_context, get_web_search_instruction
 from ._interactive import get_user_input
 from ._log import save_log
 from ._analysis import classify_conflicts, detect_dissenting_opinions, build_conflict_summary, build_agreement_matrix
+
+
+def _write_progress(output_file: str, message: str):
+    """Write an incremental progress marker to a .progress sidecar file.
+
+    This lets background/CI callers monitor progress without parsing the
+    main output file. The sidecar is overwritten each time (latest status only).
+    """
+    if not output_file:
+        return
+    progress_file = output_file + ".progress"
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(progress_file)), exist_ok=True)
+        with open(progress_file, 'w', encoding='utf-8') as f:
+            f.write(f"{datetime.now().strftime('%H:%M:%S')} {message}\n")
+    except OSError:
+        pass  # Best-effort — don't crash on write failure
 
 
 def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
@@ -52,6 +71,7 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     agent_names = [a.name for a in agents]
 
     # Scan project first (diff mode can exit early without needing CLI tools)
+    scan_stats = None
     if diff_target is not None:
         print(f"{Colors.DIM}Scanning diff at: {project_path} (target: {diff_target}){Colors.RESET}")
         project_summary = scan_diff(project_path, diff_target)
@@ -61,8 +81,20 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
         print(f"{Colors.DIM}Found changes. Starting diff review...{Colors.RESET}")
     else:
         print(f"{Colors.DIM}Scanning project at: {project_path}{Colors.RESET}")
-        project_summary = scan_project(project_path)
-        print(f"{Colors.DIM}Found project files. Starting discussion...{Colors.RESET}")
+        project_summary, scan_stats = scan_project(project_path)
+        if scan_stats.is_monorepo:
+            print(f"{Colors.DIM}Detected monorepo ({len(scan_stats.services)} services: {', '.join(scan_stats.services)}){Colors.RESET}")
+        print(f"{Colors.DIM}Found {scan_stats.total_files} files ({scan_stats.source_chars} chars of source). Starting discussion...{Colors.RESET}")
+
+    # Auto-scale timeout for large projects (only if user didn't specify --timeout)
+    auto_scaled_timeout = False
+    if scan_stats and timeout == 120:  # 120 is the argparse default
+        if (scan_stats.total_files > AUTO_TIMEOUT_FILE_THRESHOLD
+                or scan_stats.source_chars > AUTO_TIMEOUT_CHAR_THRESHOLD
+                or scan_stats.is_monorepo):
+            timeout = AUTO_TIMEOUT_LARGE
+            auto_scaled_timeout = True
+            print(f"{Colors.DIM}Auto-scaled timeout to {timeout}s for large project{Colors.RESET}")
 
     # Preflight: verify CLI tools are available (skip in dry-run mode)
     if not dry_run:
@@ -229,8 +261,17 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                 continue
 
             # Run the agent (with single retry for transient failures)
+            # Apply agent-specific timeout multiplier
+            agent_timeout = timeout
+            multiplier = AGENT_TIMEOUT_MULTIPLIERS.get(agent_key, 1.0)
+            if multiplier != 1.0:
+                agent_timeout = int(timeout * multiplier)
+
             print(f"{Colors.DIM}Waiting for {agent_name}...{Colors.RESET}")
             round_start = time.monotonic()
+
+            # Write incremental progress to output file so background runs show progress
+            _write_progress(output_file, f"Round {i+1}/{len(rounds)} — {agent_name} started")
 
             def _call_agent(t):
                 if agent_cfg:
@@ -241,11 +282,11 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                 else:
                     return run_codex(prompt, project_path, t)
 
-            result = _call_agent(timeout)
+            result = _call_agent(agent_timeout)
 
             # Retry once for transient failures (timeout, exception)
             if not result.ok and result.error_type in ("timeout", "exception", "empty_response"):
-                retry_timeout = min(timeout * 2, 600)
+                retry_timeout = min(agent_timeout * 2, 600)
                 backoff = random.uniform(3, 7)
                 print_warn(f"{agent_name} failed ({result.error_type}). Retrying in {backoff:.1f}s with {retry_timeout}s timeout...")
                 time.sleep(backoff)
@@ -256,6 +297,7 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             elapsed = time.monotonic() - round_start
             elapsed_str = f"{elapsed:.1f}s"
             print(f"{Colors.DIM}  ({agent_name} responded in {elapsed_str}){Colors.RESET}")
+            _write_progress(output_file, f"Round {i+1}/{len(rounds)} — {agent_name} done ({elapsed_str})")
 
             # Check for error responses — thread failure context so next agent is aware
             if not result.ok:
@@ -317,5 +359,12 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
 
     # Save full discussion log
     log_content = save_log(log, output_file, project_path)
+    # Clean up progress sidecar
+    try:
+        progress_file = output_file + ".progress"
+        if os.path.exists(progress_file):
+            os.unlink(progress_file)
+    except OSError:
+        pass
     print(f"\n{Colors.DIM}Roundtable complete!{Colors.RESET}\n")
     return log_content

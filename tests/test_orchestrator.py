@@ -217,6 +217,100 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertTrue(kwargs.get("is_partial"))
 
 
+class TestAutoTimeout(unittest.TestCase):
+    """Tests for auto-timeout scaling based on project size."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        # Create a project with many files to trigger auto-scaling
+        for i in range(250):
+            Path(os.path.join(self.tmpdir, f"file_{i:04d}.py")).write_text(f"# file {i}")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_auto_scales_timeout_for_large_project(self, mock_validate, mock_run_agent):
+        """Large projects should get an auto-scaled timeout."""
+        mock_run_agent.return_value = self._ok_result("review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+        # The first agent call should use 300s (auto-scaled), not 120s
+        first_call = mock_run_agent.call_args_list[0]
+        agent_timeout = first_call[0][2]  # third positional arg is timeout
+        self.assertGreaterEqual(agent_timeout, 300)
+
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_explicit_timeout_not_overridden(self, mock_validate, mock_run_agent):
+        """User-specified timeout should not be auto-scaled."""
+        mock_run_agent.return_value = self._ok_result("review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
+                       output_file=output, timeout=60)
+        first_call = mock_run_agent.call_args_list[0]
+        agent_timeout = first_call[0][2]
+        self.assertLessEqual(agent_timeout, 90)  # 60 * 1.5 max for codex
+
+
+class TestAgentTimeoutMultiplier(unittest.TestCase):
+    """Tests for per-agent timeout multipliers."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        Path(os.path.join(self.tmpdir, "main.py")).write_text("print('hello')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_codex_gets_higher_timeout(self, mock_validate, mock_run_agent):
+        """Codex agent should receive a multiplied timeout."""
+        mock_run_agent.return_value = self._ok_result("review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+        # Claude (round 1) and Codex (round 2)
+        claude_call = mock_run_agent.call_args_list[0]
+        codex_call = mock_run_agent.call_args_list[1]
+        claude_timeout = claude_call[0][2]
+        codex_timeout = codex_call[0][2]
+        self.assertGreater(codex_timeout, claude_timeout)
+
+
+class TestProgressSidecar(unittest.TestCase):
+    """Tests for incremental progress sidecar file."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        Path(os.path.join(self.tmpdir, "main.py")).write_text("print('hello')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_progress_sidecar_cleaned_up(self, mock_validate, mock_run_agent):
+        """Progress sidecar should be cleaned up after successful run."""
+        mock_run_agent.return_value = self._ok_result("review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+        self.assertFalse(os.path.exists(output + ".progress"))
+
+
 class TestDiffModeOrchestrator(unittest.TestCase):
     """Integration test for diff mode in the orchestrator."""
 
