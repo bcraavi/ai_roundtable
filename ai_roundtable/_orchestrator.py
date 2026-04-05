@@ -111,16 +111,25 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     # Register SIGTERM handler for graceful shutdown in CI / process managers
     # Only register from the main thread (signal handlers can't be set from worker threads)
     _prev_sigterm = None
+    sigterm_received = False
+
+    def _exit_on_sigterm():
+        if not sigterm_received:
+            return
+        print(f"\n\n{Colors.WARN}SIGTERM received! Saving partial discussion log...{Colors.RESET}")
+        save_log(log, output_file, project_path, is_partial=True)
+        raise SystemExit(143)  # 128 + 15 (SIGTERM)
+
     if threading.current_thread() is threading.main_thread():
         _prev_sigterm = signal.getsignal(signal.SIGTERM)
         def _sigterm_handler(signum, frame):
-            print(f"\n\n{Colors.WARN}SIGTERM received! Saving partial discussion log...{Colors.RESET}")
-            save_log(log, output_file, project_path, is_partial=True)
-            sys.exit(143)  # 128 + 15 (SIGTERM)
+            nonlocal sigterm_received
+            sigterm_received = True
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
     try:
         for i, round_info in enumerate(rounds):
+            _exit_on_sigterm()
             agent = round_info.agent
             label = round_info.label
             agent_name = "Claude" if agent == "claude" else "Codex"
@@ -207,11 +216,13 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             # Retry once for transient failures (timeout, exception)
             if not result.ok and result.error_type in ("timeout", "exception", "empty_response"):
                 retry_timeout = min(timeout * 2, 600)
-                backoff = 5
-                print_warn(f"{agent_name} failed ({result.error_type}). Retrying in {backoff}s with {retry_timeout}s timeout...")
+                backoff = random.uniform(3, 7)
+                print_warn(f"{agent_name} failed ({result.error_type}). Retrying in {backoff:.1f}s with {retry_timeout}s timeout...")
                 time.sleep(backoff)
+                _exit_on_sigterm()
                 result = _call_agent(retry_timeout)
 
+            _exit_on_sigterm()
             elapsed = time.monotonic() - round_start
             elapsed_str = f"{elapsed:.1f}s"
             print(f"{Colors.DIM}  ({agent_name} responded in {elapsed_str}){Colors.RESET}")

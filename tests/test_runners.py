@@ -193,6 +193,42 @@ class TestCLIRunners(unittest.TestCase):
         result = run_claude("prompt", "/tmp/project")
         proc.kill.assert_called()
 
+    @patch('ai_roundtable._runners.os.unlink')
+    @patch('ai_roundtable._runners.subprocess.Popen')
+    def test_nonstream_unlinks_prompt_after_wait(self, mock_popen, mock_unlink):
+        """Prompt temp file should be unlinked only after the subprocess is reaped."""
+        proc = self._mock_popen_proc(stdout="Claude says hi")
+        events = []
+
+        def _wait(*args, **kwargs):
+            events.append("wait")
+            return proc.returncode
+
+        proc.wait.side_effect = _wait
+        mock_popen.return_value = proc
+        mock_unlink.side_effect = lambda path: events.append("unlink")
+
+        result = run_claude("prompt", "/tmp/project")
+
+        self.assertTrue(result.ok)
+        self.assertIn("wait", events)
+        self.assertIn("unlink", events)
+        self.assertLess(events.index("wait"), events.index("unlink"))
+
+    @patch('ai_roundtable._runners.subprocess.Popen')
+    def test_empty_response_sanitizes_stderr_detail(self, mock_popen):
+        """Empty-response stderr detail should be sanitized before embedding."""
+        mock_popen.return_value = self._mock_popen_proc(
+            stdout="", stderr="\x1b[31mfatal\x1b[0m", returncode=0
+        )
+
+        result = run_claude("prompt", "/tmp/project")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_type, "empty_response")
+        self.assertIn("fatal", result.output)
+        self.assertNotIn("\x1b", result.output)
+
 
 class TestRunCliStreaming(unittest.TestCase):
     """Tests for the streaming subprocess runner."""
@@ -258,6 +294,32 @@ class TestRunCliStreaming(unittest.TestCase):
         )
         self.assertTrue(result.ok)
         self.assertIn("output", result.output)
+
+    @patch('ai_roundtable._runners.os.unlink')
+    @patch('ai_roundtable._runners.subprocess.Popen')
+    @patch('ai_roundtable._runners.sys.stdout')
+    def test_streaming_unlinks_prompt_after_wait(self, mock_stdout_stream, mock_popen, mock_unlink):
+        """Streaming runner should keep the prompt file until the subprocess is reaped."""
+        proc = self._make_mock_proc(["output\n"])
+        events = []
+
+        def _wait(*args, **kwargs):
+            events.append("wait")
+            return proc.returncode
+
+        proc.wait.side_effect = _wait
+        mock_popen.return_value = proc
+        mock_stdout_stream.isatty.return_value = True
+        mock_unlink.side_effect = lambda path: events.append("unlink")
+
+        result = _run_cli_streaming(
+            ["test-cmd"], "prompt", "/tmp", timeout=30, agent_name="TestAgent"
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIn("wait", events)
+        self.assertIn("unlink", events)
+        self.assertLess(events.index("wait"), events.index("unlink"))
 
     @patch('ai_roundtable._runners.subprocess.Popen')
     @patch('ai_roundtable._runners.sys.stdout')

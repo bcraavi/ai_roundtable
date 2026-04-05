@@ -226,6 +226,13 @@ class TestFetchLatestVersion(unittest.TestCase):
         version = _fetch_latest_version("react", "npm")
         self.assertIsNone(version)
 
+    @patch('ai_roundtable._web_context.urllib.request.urlopen')
+    def test_rejects_non_https_registry_urls(self, mock_urlopen):
+        with patch('ai_roundtable._web_context._PYPI_URL', 'http://example.com/{}/json'):
+            version = _fetch_latest_version("django", "pypi")
+        self.assertIsNone(version)
+        mock_urlopen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -118,7 +118,7 @@ def scan_project(project_path: str) -> str:
             # Skip oversized files (check size before reading)
             try:
                 file_size = sf_path.stat().st_size
-            except OSError:
+            except (OSError, PermissionError):
                 continue
             if file_size > MAX_SOURCE_FILE_CHARS * 4:
                 continue  # Skip very large files entirely
@@ -137,7 +137,7 @@ def scan_project(project_path: str) -> str:
                     break
             source_files_content[sf] = content
             source_chars_used += len(content)
-        except Exception as e:
+        except (OSError, PermissionError) as e:
             print_warn(f"Could not read '{sf}': {e}")
 
     # Build summary with injection boundaries

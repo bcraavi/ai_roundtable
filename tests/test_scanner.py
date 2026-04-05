@@ -127,6 +127,22 @@ class TestScanProject(unittest.TestCase):
         self.assertIn(".github/workflows/ci.yml", summary)
         self.assertIn("name: CI", summary)
 
+    def test_scan_skips_unreadable_source_file(self):
+        blocked = Path(os.path.join(self.tmpdir, "src", "blocked.py"))
+        blocked.write_text("print('blocked')")
+        original_read_bytes = Path.read_bytes
+
+        def _read_bytes(path_obj):
+            if path_obj == blocked:
+                raise PermissionError("permission denied")
+            return original_read_bytes(path_obj)
+
+        with unittest.mock.patch('pathlib.Path.read_bytes', autospec=True, side_effect=_read_bytes):
+            summary = scan_project(self.tmpdir)
+
+        self.assertIn("src/main.py", summary)
+        self.assertNotIn("print('blocked')", summary)
+
 
 class TestScanEarlyTermination(unittest.TestCase):
     """Tests for file scan early termination."""

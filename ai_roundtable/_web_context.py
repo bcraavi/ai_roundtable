@@ -72,12 +72,14 @@ def _fetch_latest_version(package: str, registry: str) -> Optional[str]:
     try:
         if registry == "pypi":
             url = _PYPI_URL.format(package)
+            assert url.startswith("https://")
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode())
                 return data.get("info", {}).get("version")
         elif registry == "npm":
             url = _NPM_URL.format(package)
+            assert url.startswith("https://")
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode())

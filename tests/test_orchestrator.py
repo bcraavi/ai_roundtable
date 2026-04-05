@@ -1,6 +1,7 @@
 """Integration tests for the run_roundtable orchestrator with mocked CLIs."""
 
 import os
+import signal
 import tempfile
 import unittest
 from pathlib import Path
@@ -136,11 +137,12 @@ class TestOrchestratorIntegration(unittest.TestCase):
         files = os.listdir(rt_dir)
         self.assertTrue(any(f.startswith("roundtable_") for f in files))
 
+    @patch('ai_roundtable._orchestrator.random.uniform', return_value=4.25)
     @patch('ai_roundtable._orchestrator.time.sleep')
     @patch('ai_roundtable._orchestrator.run_codex')
     @patch('ai_roundtable._orchestrator.run_claude')
     @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_retry_on_timeout(self, mock_preflight, mock_claude, mock_codex, mock_sleep):
+    def test_retry_on_timeout(self, mock_preflight, mock_claude, mock_codex, mock_sleep, mock_uniform):
         """Agent timeout should trigger a single retry with backoff."""
         timeout_result = self._err_result("timed out", "timeout")
         timeout_result.exit_code = None
@@ -154,13 +156,15 @@ class TestOrchestratorIntegration(unittest.TestCase):
         # Claude called twice: first attempt + retry
         self.assertEqual(mock_claude.call_count, 2)
         # Backoff sleep was called
-        mock_sleep.assert_called_once_with(5)
+        mock_uniform.assert_called_once_with(3, 7)
+        mock_sleep.assert_called_once_with(4.25)
 
+    @patch('ai_roundtable._orchestrator.random.uniform', return_value=6.5)
     @patch('ai_roundtable._orchestrator.time.sleep')
     @patch('ai_roundtable._orchestrator.run_codex')
     @patch('ai_roundtable._orchestrator.run_claude')
     @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_retry_on_empty_response(self, mock_preflight, mock_claude, mock_codex, mock_sleep):
+    def test_retry_on_empty_response(self, mock_preflight, mock_claude, mock_codex, mock_sleep, mock_uniform):
         """Empty response (exit 0, no output) should trigger a single retry."""
         empty_result = RunnerResult(ok=False, output="No response from Claude",
                                     exit_code=0, error_type="empty_response")
@@ -171,7 +175,8 @@ class TestOrchestratorIntegration(unittest.TestCase):
         result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
         self.assertIn("Claude review after retry", result)
         self.assertEqual(mock_claude.call_count, 2)
-        mock_sleep.assert_called_once_with(5)
+        mock_uniform.assert_called_once_with(3, 7)
+        mock_sleep.assert_called_once_with(6.5)
 
     @patch('ai_roundtable._orchestrator.time.sleep')
     @patch('ai_roundtable._orchestrator.run_codex')
@@ -192,6 +197,40 @@ class TestOrchestratorIntegration(unittest.TestCase):
         # Codex called twice (round 2 + round 4), no retry
         self.assertEqual(mock_codex.call_count, 2)
         mock_sleep.assert_not_called()
+
+    @patch('ai_roundtable._orchestrator.save_log')
+    @patch('ai_roundtable._orchestrator.signal.signal')
+    @patch('ai_roundtable._orchestrator.signal.getsignal')
+    @patch('ai_roundtable._orchestrator.run_codex')
+    @patch('ai_roundtable._orchestrator.run_claude')
+    @patch('ai_roundtable._orchestrator.preflight_check')
+    def test_sigterm_is_saved_from_main_loop(self, mock_preflight, mock_claude, mock_codex,
+                                             mock_getsignal, mock_signal, mock_save_log):
+        """SIGTERM should only trigger partial-log saving from the main loop."""
+        handlers = {}
+        mock_getsignal.return_value = signal.SIG_DFL
+
+        def _capture_handler(sig, handler):
+            handlers[sig] = handler
+
+        mock_signal.side_effect = _capture_handler
+
+        def _trigger_sigterm(*args, **kwargs):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+            return self._ok_result("Claude round 1 review")
+
+        mock_claude.side_effect = _trigger_sigterm
+        mock_codex.return_value = self._ok_result("Codex round 2 review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+
+        with self.assertRaises(SystemExit) as ctx:
+            run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+
+        self.assertEqual(ctx.exception.code, 143)
+        mock_save_log.assert_called_once()
+        _, kwargs = mock_save_log.call_args
+        self.assertTrue(kwargs.get("is_partial"))
+        mock_codex.assert_not_called()
 
 
 class TestDiffModeOrchestrator(unittest.TestCase):

@@ -2,6 +2,7 @@
 Conversation history — rolling summary with anchor-and-recency strategy.
 """
 
+import re
 from typing import List
 
 from ._constants import MAX_HISTORY_CHARS
@@ -31,14 +32,8 @@ def build_history_summary(history: List[dict], max_chars: int = MAX_HISTORY_CHAR
             # Extract round number from label like "Round 3 — Claude's Rebuttal & Synthesis"
             label = entry['label']
             # Try to shorten "Round N — ..." to "RN"
-            if label.startswith("Round "):
-                parts_of_label = label.split(" ", 2)
-                if len(parts_of_label) >= 2 and parts_of_label[1].rstrip("—").strip().isdigit():
-                    short_label = f"R{parts_of_label[1].rstrip('—').strip()}"
-                else:
-                    short_label = label
-            else:
-                short_label = label
+            match = re.match(r'Round (\d+)', label)
+            short_label = f"R{match.group(1)}" if match else label
             parts.append(f"### {short_label} ({entry['agent']})\n{entry['response']}")
         else:
             parts.append(f"### {entry['label']} ({entry['agent']})\n{entry['response']}")

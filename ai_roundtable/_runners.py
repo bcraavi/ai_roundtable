@@ -32,6 +32,8 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
     try:
         if stream and sys.stdout.isatty():
             return _run_cli_streaming(cmd, prompt, project_path, timeout, agent_name, env)
+        proc = None
+        prompt_path = None
         # Non-streaming: bounded Popen reads (prevents OOM from runaway output).
         # Use temp file for stdin to avoid pipe buffer issues with large prompts
         # (see https://github.com/anthropics/claude-code/issues/7263).
@@ -55,15 +57,7 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
                         output=f"'{cmd[0]}' not found. Is {agent_name} CLI installed and in PATH?",
                         exit_code=None, error_type="not_found")
         except Exception:
-            try:
-                os.unlink(prompt_path)
-            except OSError:
-                pass
             raise
-        try:
-            os.unlink(prompt_path)
-        except OSError:
-            pass
 
         # Drain stdout/stderr concurrently with hard char cap.
         # When cap is hit, kill the process to prevent pipe deadlock
@@ -136,7 +130,7 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
                     )
                 print_warn(f"{agent_name} CLI exited with code {proc.returncode} but produced output; using it.")
             if not stdout:
-                err_detail = f": {stderr[:200]}" if stderr else ""
+                err_detail = f": {sanitize_terminal_output(stderr[:200])}" if stderr else ""
                 etype = "empty_response" if (proc.returncode or 0) == 0 else "exit_error"
                 return RunnerResult(ok=False, output=f"No response from {agent_name}{err_detail}",
                                     exit_code=proc.returncode, error_type=etype)
@@ -158,6 +152,11 @@ def _run_cli(cmd: List[str], prompt: str, project_path: str, timeout: int,
                 proc.wait(timeout=5)
             except Exception:
                 pass
+            if prompt_path is not None:
+                try:
+                    os.unlink(prompt_path)
+                except OSError:
+                    pass
     except Exception as e:
         return RunnerResult(ok=False, output=f"{agent_name} error: {str(e)}",
                             exit_code=None, error_type="exception")
@@ -174,6 +173,7 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
     - Cap-break deadlock: process is killed before joining threads
     """
     proc = None
+    prompt_path = None
     try:
         # Use temp file for stdin to avoid pipe buffer issues with large prompts
         prompt_fd, prompt_path = tempfile.mkstemp(suffix='.txt', prefix='rt_prompt_')
@@ -196,15 +196,7 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
                         output=f"'{cmd[0]}' not found. Is {agent_name} CLI installed and in PATH?",
                         exit_code=None, error_type="not_found")
         except Exception:
-            try:
-                os.unlink(prompt_path)
-            except OSError:
-                pass
             raise
-        try:
-            os.unlink(prompt_path)
-        except OSError:
-            pass
 
         # Queue-based stdout reader thread — enables deadline-aware timeout.
         # Uses chunk-based reads (read(4096)) instead of line iteration to
@@ -312,7 +304,7 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
                 return RunnerResult(ok=False, output=f"{agent_name} exited with code {returncode}: {sanitize_terminal_output(stderr.strip()) or 'No output'}",
                                     exit_code=returncode, error_type="exit_error")
         if not stdout:
-            err_detail = f": {stderr.strip()[:200]}" if stderr.strip() else ""
+            err_detail = f": {sanitize_terminal_output(stderr.strip()[:200])}" if stderr.strip() else ""
             etype = "empty_response" if returncode == 0 else "exit_error"
             return RunnerResult(ok=False, output=f"No response from {agent_name}{err_detail}",
                                 exit_code=returncode, error_type=etype)
@@ -336,6 +328,11 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
             try:
                 proc.wait(timeout=5)
             except Exception:
+                pass
+        if prompt_path is not None:
+            try:
+                os.unlink(prompt_path)
+            except OSError:
                 pass
 
 
