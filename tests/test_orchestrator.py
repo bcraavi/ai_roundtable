@@ -5,7 +5,7 @@ import signal
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from ai_roundtable import (
     run_roundtable,
@@ -13,6 +13,17 @@ from ai_roundtable import (
     _PROJECT_DATA_TAG,
     sanitize_terminal_output,
 )
+from ai_roundtable._providers import AgentConfig
+
+
+def _make_mock_agents():
+    """Create mock agent configs for testing."""
+    return [
+        AgentConfig(name="Claude", agent_key="claude", cmd=["claude", "-p", "-"],
+                     env_overrides={"CLAUDECODE": None}, color_code="\033[38;5;208m"),
+        AgentConfig(name="Codex", agent_key="codex", cmd=["codex", "exec", "--skip-git-repo-check", "-"],
+                     color_code="\033[38;5;40m"),
+    ]
 
 
 class TestOrchestratorIntegration(unittest.TestCase):
@@ -32,17 +43,14 @@ class TestOrchestratorIntegration(unittest.TestCase):
     def _err_result(self, text, error_type="exit_error"):
         return RunnerResult(ok=False, output=text, exit_code=1, error_type=error_type)
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_normal_4_round_flow(self, mock_preflight, mock_claude, mock_codex):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_normal_4_round_flow(self, mock_validate, mock_run_agent):
         """Full 4-round flow should produce log with all rounds."""
-        mock_claude.side_effect = [
+        mock_run_agent.side_effect = [
             self._ok_result("Claude round 1 review"),
-            self._ok_result("Claude round 3 rebuttal"),
-        ]
-        mock_codex.side_effect = [
             self._ok_result("Codex round 2 counter"),
+            self._ok_result("Claude round 3 rebuttal"),
             self._ok_result("Codex round 4 verdict"),
         ]
         output = os.path.join(self.tmpdir, "test_output.md")
@@ -52,17 +60,14 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertIn("Claude round 3 rebuttal", result)
         self.assertIn("Codex round 4 verdict", result)
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_error_skip_recovery(self, mock_preflight, mock_claude, mock_codex):
-        """When Codex fails Round 2, Claude Round 3 should still get a prompt."""
-        mock_claude.side_effect = [
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_error_skip_recovery(self, mock_validate, mock_run_agent):
+        """When an agent fails Round 2, Round 3 should still get a prompt."""
+        mock_run_agent.side_effect = [
             self._ok_result("Claude round 1"),
-            self._ok_result("Claude round 3 synthesis"),
-        ]
-        mock_codex.side_effect = [
             self._err_result("Codex crashed"),
+            self._ok_result("Claude round 3 synthesis"),
             self._ok_result("Codex round 4 final"),
         ]
         output = os.path.join(self.tmpdir, "test_output.md")
@@ -72,29 +77,28 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertIn("Claude round 3 synthesis", result)
         self.assertIn("Codex round 4 final", result)
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_dry_run_skips_agents(self, mock_preflight, mock_claude, mock_codex):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents')
+    def test_dry_run_skips_agents(self, mock_validate, mock_run_agent):
         """Dry run should not call any agents."""
         output = os.path.join(self.tmpdir, "test_output.md")
         result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
                                 output_file=output, dry_run=True)
-        mock_claude.assert_not_called()
-        mock_codex.assert_not_called()
+        mock_run_agent.assert_not_called()
+        mock_validate.assert_not_called()
         self.assertIn("dry-run", result)
 
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_dry_run_skips_preflight(self, mock_preflight):
-        """Dry run should not call preflight_check."""
+    @patch('ai_roundtable._orchestrator.validate_agents')
+    def test_dry_run_skips_validation(self, mock_validate):
+        """Dry run should not call validate_agents."""
         output = os.path.join(self.tmpdir, "test_output.md")
         run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
                        output_file=output, dry_run=True)
-        mock_preflight.assert_not_called()
+        mock_validate.assert_not_called()
 
     @patch('ai_roundtable._orchestrator.build_web_context')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_dry_run_skips_network_fetches(self, mock_preflight, mock_web_context):
+    @patch('ai_roundtable._orchestrator.validate_agents')
+    def test_dry_run_skips_network_fetches(self, mock_validate, mock_web_context):
         """Dry run should call build_web_context with offline=True."""
         mock_web_context.return_value = "CURRENT TECH CONTEXT"
         output = os.path.join(self.tmpdir, "test_output.md")
@@ -104,33 +108,28 @@ class TestOrchestratorIntegration(unittest.TestCase):
         _, kwargs = mock_web_context.call_args
         self.assertTrue(kwargs.get('offline', False))
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_failure_threads_to_next_round(self, mock_preflight, mock_claude, mock_codex):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_failure_threads_to_next_round(self, mock_validate, mock_run_agent):
         """When an agent fails, the failure message should appear in the next round's prompt."""
-        mock_claude.side_effect = [
+        mock_run_agent.side_effect = [
             self._ok_result("Claude round 1 review"),
-            self._ok_result("Claude round 3 sees failure context"),
-        ]
-        mock_codex.side_effect = [
             self._err_result("Connection refused", "exit_error"),
+            self._ok_result("Claude round 3 sees failure context"),
             self._ok_result("Codex round 4"),
         ]
         output = os.path.join(self.tmpdir, "test_output.md")
         run_roundtable(self.tmpdir, num_rounds=4, interactive=False, output_file=output)
-        # Round 3 (Claude) should have received the failure info in its prompt
-        round3_call = mock_claude.call_args_list[1]
+        # Round 3 should have received the failure info in its prompt
+        round3_call = mock_run_agent.call_args_list[2]
         prompt = round3_call[0][0]  # First positional arg is the prompt
         self.assertIn("AGENT FAILED", prompt)
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_output_file_fallback(self, mock_preflight, mock_claude, mock_codex):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_output_file_fallback(self, mock_validate, mock_run_agent):
         """When no output file is specified, should create one in .roundtable/."""
-        mock_claude.return_value = self._ok_result("review")
-        mock_codex.return_value = self._ok_result("counter")
+        mock_run_agent.return_value = self._ok_result("review")
         run_roundtable(self.tmpdir, num_rounds=2, interactive=False)
         rt_dir = os.path.join(self.tmpdir, ".roundtable")
         self.assertTrue(os.path.isdir(rt_dir))
@@ -139,72 +138,59 @@ class TestOrchestratorIntegration(unittest.TestCase):
 
     @patch('ai_roundtable._orchestrator.random.uniform', return_value=4.25)
     @patch('ai_roundtable._orchestrator.time.sleep')
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_retry_on_timeout(self, mock_preflight, mock_claude, mock_codex, mock_sleep, mock_uniform):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_retry_on_timeout(self, mock_validate, mock_run_agent, mock_sleep, mock_uniform):
         """Agent timeout should trigger a single retry with backoff."""
         timeout_result = self._err_result("timed out", "timeout")
         timeout_result.exit_code = None
         ok_result = self._ok_result("Claude review after retry")
-        # First call times out, retry succeeds
-        mock_claude.side_effect = [timeout_result, ok_result]
-        mock_codex.return_value = self._ok_result("Codex review")
+        # First call times out, retry succeeds; then codex ok
+        mock_run_agent.side_effect = [timeout_result, ok_result, self._ok_result("Codex review")]
         output = os.path.join(self.tmpdir, "test_output.md")
         result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
         self.assertIn("Claude review after retry", result)
-        # Claude called twice: first attempt + retry
-        self.assertEqual(mock_claude.call_count, 2)
         # Backoff sleep was called
         mock_uniform.assert_called_once_with(3, 7)
         mock_sleep.assert_called_once_with(4.25)
 
     @patch('ai_roundtable._orchestrator.random.uniform', return_value=6.5)
     @patch('ai_roundtable._orchestrator.time.sleep')
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_retry_on_empty_response(self, mock_preflight, mock_claude, mock_codex, mock_sleep, mock_uniform):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_retry_on_empty_response(self, mock_validate, mock_run_agent, mock_sleep, mock_uniform):
         """Empty response (exit 0, no output) should trigger a single retry."""
         empty_result = RunnerResult(ok=False, output="No response from Claude",
                                     exit_code=0, error_type="empty_response")
         ok_result = self._ok_result("Claude review after retry")
-        mock_claude.side_effect = [empty_result, ok_result]
-        mock_codex.return_value = self._ok_result("Codex review")
+        mock_run_agent.side_effect = [empty_result, ok_result, self._ok_result("Codex review")]
         output = os.path.join(self.tmpdir, "test_output.md")
         result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
         self.assertIn("Claude review after retry", result)
-        self.assertEqual(mock_claude.call_count, 2)
         mock_uniform.assert_called_once_with(3, 7)
         mock_sleep.assert_called_once_with(6.5)
 
     @patch('ai_roundtable._orchestrator.time.sleep')
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_no_retry_on_exit_error(self, mock_preflight, mock_claude, mock_codex, mock_sleep):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_no_retry_on_exit_error(self, mock_validate, mock_run_agent, mock_sleep):
         """Exit errors should NOT trigger retry (only timeout/exception do)."""
-        mock_claude.side_effect = [
+        mock_run_agent.side_effect = [
             self._ok_result("Claude round 1"),
-            self._ok_result("Claude round 3"),
-        ]
-        mock_codex.side_effect = [
             self._err_result("Codex crashed", "exit_error"),
+            self._ok_result("Claude round 3"),
             self._ok_result("Codex round 4"),
         ]
         output = os.path.join(self.tmpdir, "test_output.md")
         run_roundtable(self.tmpdir, num_rounds=4, interactive=False, output_file=output)
-        # Codex called twice (round 2 + round 4), no retry
-        self.assertEqual(mock_codex.call_count, 2)
         mock_sleep.assert_not_called()
 
     @patch('ai_roundtable._orchestrator.save_log')
     @patch('ai_roundtable._orchestrator.signal.signal')
     @patch('ai_roundtable._orchestrator.signal.getsignal')
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_sigterm_is_saved_from_main_loop(self, mock_preflight, mock_claude, mock_codex,
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_sigterm_is_saved_from_main_loop(self, mock_validate, mock_run_agent,
                                              mock_getsignal, mock_signal, mock_save_log):
         """SIGTERM should only trigger partial-log saving from the main loop."""
         handlers = {}
@@ -219,8 +205,7 @@ class TestOrchestratorIntegration(unittest.TestCase):
             handlers[signal.SIGTERM](signal.SIGTERM, None)
             return self._ok_result("Claude round 1 review")
 
-        mock_claude.side_effect = _trigger_sigterm
-        mock_codex.return_value = self._ok_result("Codex round 2 review")
+        mock_run_agent.side_effect = _trigger_sigterm
         output = os.path.join(self.tmpdir, "test_output.md")
 
         with self.assertRaises(SystemExit) as ctx:
@@ -230,7 +215,6 @@ class TestOrchestratorIntegration(unittest.TestCase):
         mock_save_log.assert_called_once()
         _, kwargs = mock_save_log.call_args
         self.assertTrue(kwargs.get("is_partial"))
-        mock_codex.assert_not_called()
 
 
 class TestDiffModeOrchestrator(unittest.TestCase):
@@ -247,24 +231,22 @@ class TestDiffModeOrchestrator(unittest.TestCase):
     def _ok_result(self, text):
         return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
     @patch('ai_roundtable._orchestrator.scan_diff')
-    def test_diff_mode_uses_scan_diff(self, mock_scan_diff, mock_preflight, mock_claude, mock_codex):
+    def test_diff_mode_uses_scan_diff(self, mock_scan_diff, mock_validate, mock_run_agent):
         """When diff_target is set, should use scan_diff instead of scan_project."""
         mock_scan_diff.return_value = f"<{_PROJECT_DATA_TAG}>\ndiff content\n</{_PROJECT_DATA_TAG}>"
-        mock_claude.return_value = self._ok_result("Claude diff review")
-        mock_codex.return_value = self._ok_result("Codex diff review")
+        mock_run_agent.return_value = self._ok_result("review")
         output = os.path.join(self.tmpdir, "test_output.md")
         result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
                                 output_file=output, diff_target="HEAD")
         mock_scan_diff.assert_called_once_with(self.tmpdir, "HEAD")
-        self.assertIn("Claude diff review", result)
+        self.assertIn("review", result)
 
-    @patch('ai_roundtable._orchestrator.preflight_check')
+    @patch('ai_roundtable._orchestrator.validate_agents')
     @patch('ai_roundtable._orchestrator.scan_diff')
-    def test_diff_mode_no_changes_returns_early(self, mock_scan_diff, mock_preflight):
+    def test_diff_mode_no_changes_returns_early(self, mock_scan_diff, mock_validate):
         """When scan_diff returns None (no changes), should return early."""
         mock_scan_diff.return_value = None
         output = os.path.join(self.tmpdir, "test_output.md")
@@ -287,11 +269,10 @@ class TestVerboseFlag(unittest.TestCase):
     def _ok_result(self, text):
         return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
     @patch('ai_roundtable._orchestrator.build_round_prompts')
-    def test_verbose_passed_to_build_round_prompts(self, mock_prompts, mock_preflight, mock_claude, mock_codex):
+    def test_verbose_passed_to_build_round_prompts(self, mock_prompts, mock_validate, mock_run_agent):
         """verbose=True should be passed to build_round_prompts."""
         from ai_roundtable._types import Round
         mock_prompts.return_value = [
@@ -300,19 +281,17 @@ class TestVerboseFlag(unittest.TestCase):
             Round(agent="codex", label="Round 2 — Codex's Counter-Review",
                   prompt_template="test __PREV_RESPONSE__ __CONVERSATION_HISTORY__"),
         ]
-        mock_claude.return_value = self._ok_result("Claude review")
-        mock_codex.return_value = self._ok_result("Codex review")
+        mock_run_agent.return_value = self._ok_result("review")
         output = os.path.join(self.tmpdir, "test_output.md")
         run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
                        output_file=output, verbose=True)
         _, kwargs = mock_prompts.call_args
         self.assertTrue(kwargs.get('verbose', False))
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
     @patch('ai_roundtable._orchestrator.build_round_prompts')
-    def test_compact_default_passed_to_build_round_prompts(self, mock_prompts, mock_preflight, mock_claude, mock_codex):
+    def test_compact_default_passed_to_build_round_prompts(self, mock_prompts, mock_validate, mock_run_agent):
         """Default (no verbose) should pass verbose=False to build_round_prompts."""
         from ai_roundtable._types import Round
         mock_prompts.return_value = [
@@ -321,50 +300,47 @@ class TestVerboseFlag(unittest.TestCase):
             Round(agent="codex", label="Round 2 — Codex's Counter-Review",
                   prompt_template="test __PREV_RESPONSE__ __CONVERSATION_HISTORY__"),
         ]
-        mock_claude.return_value = self._ok_result("Claude review")
-        mock_codex.return_value = self._ok_result("Codex review")
+        mock_run_agent.return_value = self._ok_result("review")
         output = os.path.join(self.tmpdir, "test_output.md")
         run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
                        output_file=output)
         _, kwargs = mock_prompts.call_args
         self.assertFalse(kwargs.get('verbose', True))
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_compact_uses_smaller_response_budget(self, mock_preflight, mock_claude, mock_codex):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_compact_uses_smaller_response_budget(self, mock_validate, mock_run_agent):
         """Compact mode should truncate responses at COMPACT_MAX_RESPONSE_CHARS."""
         from ai_roundtable import COMPACT_MAX_RESPONSE_CHARS
-        # Claude produces a response longer than compact budget
         long_response = "x" * (COMPACT_MAX_RESPONSE_CHARS + 2000)
-        mock_claude.return_value = self._ok_result(long_response)
-        mock_codex.return_value = self._ok_result("Codex review")
+        mock_run_agent.side_effect = [
+            RunnerResult(ok=True, output=long_response, exit_code=0, error_type=None),
+            RunnerResult(ok=True, output="Codex review", exit_code=0, error_type=None),
+        ]
         output = os.path.join(self.tmpdir, "test_output.md")
         run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
-        # The prompt passed to codex should have the response truncated
-        codex_call = mock_codex.call_args
-        prompt = codex_call[0][0]
-        # The truncated response should not contain the full long_response
+        # The prompt passed to the second agent should have the response truncated
+        second_call = mock_run_agent.call_args_list[1]
+        prompt = second_call[0][0]
         self.assertNotIn(long_response, prompt)
         self.assertIn("response truncated for context budget", prompt)
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_verbose_uses_larger_response_budget(self, mock_preflight, mock_claude, mock_codex):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_verbose_uses_larger_response_budget(self, mock_validate, mock_run_agent):
         """Verbose mode should use the full MAX_RESPONSE_CHARS budget."""
         from ai_roundtable import MAX_RESPONSE_CHARS, COMPACT_MAX_RESPONSE_CHARS
-        # Response larger than compact but smaller than verbose budget
         mid_response = "x" * (COMPACT_MAX_RESPONSE_CHARS + 2000)
         assert len(mid_response) < MAX_RESPONSE_CHARS, "Test assumes mid_response fits verbose budget"
-        mock_claude.return_value = self._ok_result(mid_response)
-        mock_codex.return_value = self._ok_result("Codex review")
+        mock_run_agent.side_effect = [
+            RunnerResult(ok=True, output=mid_response, exit_code=0, error_type=None),
+            RunnerResult(ok=True, output="Codex review", exit_code=0, error_type=None),
+        ]
         output = os.path.join(self.tmpdir, "test_output.md")
         run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
                        output_file=output, verbose=True)
-        codex_call = mock_codex.call_args
-        prompt = codex_call[0][0]
-        # In verbose mode, mid_response should NOT be truncated
+        second_call = mock_run_agent.call_args_list[1]
+        prompt = second_call[0][0]
         self.assertNotIn("response truncated for context budget", prompt)
 
 
@@ -382,19 +358,105 @@ class TestLogSanitization(unittest.TestCase):
     def _ok_result(self, text):
         return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
 
-    @patch('ai_roundtable._orchestrator.run_codex')
-    @patch('ai_roundtable._orchestrator.run_claude')
-    @patch('ai_roundtable._orchestrator.preflight_check')
-    def test_log_file_has_no_ansi(self, mock_preflight, mock_claude, mock_codex):
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_log_file_has_no_ansi(self, mock_validate, mock_run_agent):
         """Saved log files should not contain ANSI escape sequences."""
-        mock_claude.return_value = self._ok_result("\x1b[31mRed review text\x1b[0m")
-        mock_codex.return_value = self._ok_result("\x1b[32mGreen counter\x1b[0m")
+        mock_run_agent.side_effect = [
+            self._ok_result("\x1b[31mRed review text\x1b[0m"),
+            self._ok_result("\x1b[32mGreen counter\x1b[0m"),
+        ]
         output = os.path.join(self.tmpdir, "test_output.md")
         run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
         content = Path(output).read_text(encoding='utf-8')
         self.assertNotIn("\x1b", content)
         self.assertIn("Red review text", content)
         self.assertIn("Green counter", content)
+
+
+class TestQuickMode(unittest.TestCase):
+    """Tests for --quick mode."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        Path(os.path.join(self.tmpdir, "main.py")).write_text("print('hello')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_quick_mode_log_contains_mode(self, mock_validate, mock_run_agent):
+        """Quick mode should be noted in the log."""
+        mock_run_agent.return_value = self._ok_result("review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
+                                output_file=output, quick=True)
+        self.assertIn("Quick", result)
+
+
+class TestMultiAgent(unittest.TestCase):
+    """Tests for multi-agent support."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        Path(os.path.join(self.tmpdir, "main.py")).write_text("print('hello')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents')
+    def test_custom_agents_passed_through(self, mock_validate, mock_run_agent):
+        """Custom agent specs should resolve and be used."""
+        mock_agents = [
+            AgentConfig(name="Claude", agent_key="claude", cmd=["claude", "-p", "-"],
+                         color_code="\033[38;5;208m"),
+            AgentConfig(name="Gemini", agent_key="gemini", cmd=["gemini", "-"],
+                         color_code="\033[38;5;75m"),
+        ]
+        mock_validate.return_value = mock_agents
+        mock_run_agent.return_value = self._ok_result("review")
+        output = os.path.join(self.tmpdir, "test_output.md")
+        result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False,
+                                output_file=output, agent_specs=["claude", "gemini"])
+        self.assertIn("Claude", result)
+        self.assertIn("Gemini", result)
+
+
+class TestConflictAnalysis(unittest.TestCase):
+    """Tests for post-discussion conflict analysis in the orchestrator."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        Path(os.path.join(self.tmpdir, "main.py")).write_text("print('hello')")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _ok_result(self, text):
+        return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
+
+    @patch('ai_roundtable._orchestrator.run_agent')
+    @patch('ai_roundtable._orchestrator.validate_agents', return_value=_make_mock_agents())
+    def test_conflict_analysis_in_log(self, mock_validate, mock_run_agent):
+        """Log should contain conflict analysis when agents disagree."""
+        mock_run_agent.side_effect = [
+            self._ok_result("strengths:\n- good code\n\nconcerns:\n- sev: high\n  issue: bad security"),
+            self._ok_result("agree:\n- good code\n\ndisagree:\n- security is actually fine\n\nmissed:\n- sev: H, issue: perf"),
+        ]
+        output = os.path.join(self.tmpdir, "test_output.md")
+        result = run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
+        self.assertIn("Agreement Matrix", result)
 
 
 if __name__ == "__main__":

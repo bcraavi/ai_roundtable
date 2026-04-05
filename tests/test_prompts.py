@@ -1,6 +1,8 @@
 """Tests for round prompt construction."""
 
+import os
 import unittest
+import unittest.mock
 
 from ai_roundtable import (
     build_round_prompts,
@@ -119,6 +121,13 @@ class TestCompactPrompts(unittest.TestCase):
         self.assertIn("scores:", rounds[3].prompt_template)
         self.assertIn("verdict:", rounds[3].prompt_template)
 
+    def test_compact_round4_has_peer_scorecard(self):
+        """Final round should include peer evaluation scorecard."""
+        rounds = build_round_prompts("test summary", "all", 4)
+        self.assertIn("peer_scores:", rounds[3].prompt_template)
+        self.assertIn("accuracy:", rounds[3].prompt_template)
+        self.assertIn("thoroughness:", rounds[3].prompt_template)
+
     def test_compact_overflow_has_format_instructions(self):
         rounds = build_round_prompts("test summary", "all", 6)
         self.assertIn("resolved:", rounds[4].prompt_template)
@@ -180,6 +189,48 @@ class TestVerbosePrompts(unittest.TestCase):
         rounds = build_round_prompts("test summary", "all", 6, verbose=True)
         self.assertEqual(len(rounds), 6)
 
+    def test_verbose_final_round_has_peer_evaluation(self):
+        """Verbose final round should include peer evaluation section."""
+        rounds = build_round_prompts("test summary", "all", 4, verbose=True)
+        self.assertIn("PEER EVALUATION", rounds[3].prompt_template)
+        self.assertIn("Accuracy", rounds[3].prompt_template)
+
+
+class TestMultiAgentPrompts(unittest.TestCase):
+    """Tests for multi-agent prompt construction."""
+
+    def test_custom_agent_names(self):
+        """Custom agent names should appear in prompts."""
+        rounds = build_round_prompts("test", "all", 2, agent_names=["Gemini", "Claude"])
+        self.assertIn("Gemini", rounds[0].prompt)
+        self.assertIn("Claude", rounds[1].prompt_template)
+
+    def test_three_agents_round_robin(self):
+        """Three agents should rotate through rounds."""
+        rounds = build_round_prompts("test", "all", 6,
+                                     agent_names=["Claude", "Codex", "Gemini"])
+        agents = [r.agent for r in rounds]
+        # Round robin: 0,1,2,0,1,2
+        self.assertEqual(agents[0], "claude")
+        self.assertEqual(agents[1], "codex")
+        self.assertEqual(agents[2], "gemini")
+        self.assertEqual(agents[3], "claude")
+        self.assertEqual(agents[4], "codex")
+        self.assertEqual(agents[5], "gemini")
+
+    def test_agent_names_in_labels(self):
+        """Agent names should appear in round labels."""
+        rounds = build_round_prompts("test", "all", 2,
+                                     agent_names=["MyAgent", "YourAgent"])
+        self.assertIn("MyAgent", rounds[0].label)
+        self.assertIn("YourAgent", rounds[1].label)
+
+    def test_default_names_are_claude_codex(self):
+        """Default agent names should be Claude and Codex."""
+        rounds = build_round_prompts("test", "all", 2)
+        self.assertIn("Claude", rounds[0].label)
+        self.assertIn("Codex", rounds[1].label)
+
 
 class TestRoundLabels(unittest.TestCase):
     """Verify round labeling conventions."""
@@ -215,25 +266,28 @@ class TestPromptBudget(unittest.TestCase):
         from ai_roundtable import RunnerResult
         return RunnerResult(ok=True, output=text, exit_code=0, error_type=None)
 
-    @unittest.mock.patch('ai_roundtable._orchestrator.run_codex')
-    @unittest.mock.patch('ai_roundtable._orchestrator.run_claude')
-    @unittest.mock.patch('ai_roundtable._orchestrator.preflight_check')
-    def test_prompt_trimmed_when_over_budget(self, mock_preflight, mock_claude, mock_codex):
+    @unittest.mock.patch('ai_roundtable._orchestrator.run_agent')
+    @unittest.mock.patch('ai_roundtable._orchestrator.validate_agents')
+    def test_prompt_trimmed_when_over_budget(self, mock_validate, mock_run_agent):
         """Prompts exceeding MAX_PROMPT_CHARS should be trimmed."""
         from ai_roundtable import run_roundtable, MAX_PROMPT_CHARS
-        mock_claude.return_value = self._ok_result("x" * (MAX_PROMPT_CHARS + 1000))
-        mock_codex.return_value = self._ok_result("Codex review")
+        from ai_roundtable._providers import AgentConfig
+        mock_validate.return_value = [
+            AgentConfig(name="Claude", agent_key="claude", cmd=["claude", "-p", "-"],
+                         color_code="\033[38;5;208m"),
+            AgentConfig(name="Codex", agent_key="codex", cmd=["codex", "exec", "-"],
+                         color_code="\033[38;5;40m"),
+        ]
+        mock_run_agent.side_effect = [
+            self._ok_result("x" * (MAX_PROMPT_CHARS + 1000)),
+            self._ok_result("Codex review"),
+        ]
         output = os.path.join(self.tmpdir, "test_output.md")
         run_roundtable(self.tmpdir, num_rounds=2, interactive=False, output_file=output)
-        # Round 2 prompt should have been trimmed — verify codex was called
-        # and the prompt it received is within budget
-        codex_call = mock_codex.call_args
-        prompt = codex_call[0][0]
-        self.assertLessEqual(len(prompt), MAX_PROMPT_CHARS + 100)  # small overhead from trim message
+        second_call = mock_run_agent.call_args_list[1]
+        prompt = second_call[0][0]
+        self.assertLessEqual(len(prompt), MAX_PROMPT_CHARS + 100)
 
-
-import os
-import unittest.mock
 
 if __name__ == "__main__":
     unittest.main()

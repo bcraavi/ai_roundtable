@@ -18,7 +18,7 @@ def main():
     Colors._resolve()
 
     parser = argparse.ArgumentParser(
-        description="AI Roundtable — Multi-agent project review with Claude CLI & Codex CLI",
+        description="AI Roundtable — Multi-agent project review with pluggable AI agents",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
             Examples:
@@ -28,10 +28,19 @@ def main():
               ai-roundtable ./my-webapp --no-interactive
               ai-roundtable ./my-webapp --diff
               ai-roundtable ./my-webapp --diff main
+              ai-roundtable ./my-webapp --quick
+              ai-roundtable ./my-webapp --agents claude gemini
+              ai-roundtable ./my-webapp --agents claude codex gemini
+
+            Agent specs (--agents):
+              claude, codex, gemini     Built-in providers
+              opencode, aider, q        More built-in providers
+              copilot                   GitHub Copilot (via gh)
+              ollama:codellama          Ollama with specific model
+              any-cli-tool              Generic CLI that reads stdin
 
             Round counts: minimum 2. Odd values mean the last round is
-            always Claude (no Codex final verdict). Use even values for
-            a balanced debate ending with Codex's scoring.
+            always the first agent. Use even values for a balanced debate.
         """)
     )
     parser.add_argument("project_path", help="Path to your project directory")
@@ -48,6 +57,10 @@ def main():
                         help="Review only changed files (diff mode). TARGET can be HEAD (default), a branch name, or HEAD~N.")
     parser.add_argument("--verbose", action="store_true",
                         help="Use verbose prose output (default: compact structured format for inter-agent efficiency)")
+    parser.add_argument("--quick", action="store_true",
+                        help="Quick mode: 2 rounds, non-interactive, skip deep debate (best for trivial changes)")
+    parser.add_argument("--agents", nargs="+", default=None, metavar="AGENT",
+                        help="Agent specs to use (default: claude codex). Examples: claude codex gemini ollama:codellama")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
@@ -65,9 +78,15 @@ def main():
             print_error(str(e))
             sys.exit(1)
 
-    # Enforce minimum rounds
-    num_rounds = max(2, args.rounds)
-    if args.rounds < 2:
+    # Quick mode overrides
+    if args.quick:
+        num_rounds = 2
+        interactive = False
+    else:
+        num_rounds = max(2, args.rounds)
+        interactive = not args.no_interactive
+
+    if not args.quick and args.rounds < 2:
         print_warn(f"--rounds must be at least 2. Using {num_rounds}.")
 
     try:
@@ -76,11 +95,13 @@ def main():
             focus=args.focus,
             num_rounds=num_rounds,
             timeout=args.timeout,
-            interactive=not args.no_interactive,
+            interactive=interactive,
             output_file=args.output,
             dry_run=args.dry_run,
             diff_target=args.diff,
-            verbose=args.verbose
+            verbose=args.verbose,
+            agent_specs=args.agents,
+            quick=args.quick,
         )
     except RoundtableError as e:
         print_error(str(e))

@@ -1,5 +1,9 @@
 """
 Preflight checks — verify required CLI tools before starting.
+
+Note: The new provider system (_providers.py) handles agent validation
+for multi-provider setups. This module is kept for backward compatibility
+and direct API usage.
 """
 
 import shutil

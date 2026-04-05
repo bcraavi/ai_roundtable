@@ -336,6 +336,32 @@ def _run_cli_streaming(cmd: List[str], prompt: str, project_path: str, timeout: 
                 pass
 
 
+def run_agent(prompt: str, project_path: str, timeout: int = 120,
+              agent_config=None) -> RunnerResult:
+    """Run any configured agent CLI with prompt via stdin.
+
+    Accepts an AgentConfig from the provider registry.
+    Falls back to Claude if no config provided.
+    """
+    if agent_config is None:
+        # Fallback: run claude with defaults
+        return run_claude(prompt, project_path, timeout)
+
+    cmd = list(agent_config.cmd)
+    env = os.environ.copy()
+
+    # Apply env overrides (None = remove the var)
+    if agent_config.env_overrides:
+        for key, val in agent_config.env_overrides.items():
+            if val is None:
+                env.pop(key, None)
+            else:
+                env[key] = val
+
+    return _run_cli(cmd, prompt, project_path, timeout, agent_config.name,
+                    env=env, stream=True)
+
+
 def run_claude(prompt: str, project_path: str, timeout: int = 120,
                cmd_path: Optional[str] = None) -> RunnerResult:
     """Run Claude CLI with prompt via stdin and return a structured result."""

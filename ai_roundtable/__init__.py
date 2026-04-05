@@ -88,12 +88,27 @@ from ._diff import (
 )
 
 from ._runners import (
+    run_agent,
     run_claude,
     run_codex,
 )
 
 # Private runner functions — available for test imports but not in __all__
 from ._runners import _run_cli, _run_cli_streaming  # noqa: F811
+
+from ._providers import (
+    AgentConfig,
+    resolve_agents,
+    validate_agents,
+    parse_agent_spec,
+)
+
+from ._analysis import (
+    classify_conflicts,
+    detect_dissenting_opinions,
+    build_conflict_summary,
+    build_agreement_matrix,
+)
 
 from ._history import build_history_summary
 
@@ -143,7 +158,12 @@ __all__ = [
     # Diff
     "validate_diff_target", "scan_diff",
     # Runners (public)
-    "run_claude", "run_codex",
+    "run_agent", "run_claude", "run_codex",
+    # Providers
+    "AgentConfig", "resolve_agents", "validate_agents", "parse_agent_spec",
+    # Analysis
+    "classify_conflicts", "detect_dissenting_opinions",
+    "build_conflict_summary", "build_agreement_matrix",
     # History
     "build_history_summary",
     # Prompts

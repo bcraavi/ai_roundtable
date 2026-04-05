@@ -21,21 +21,23 @@ from ._constants import (
 from ._types import RoundtableError
 from ._colors import Colors, print_banner, print_separator, print_agent, print_warn, print_error
 from ._sanitize import sanitize_project_content, sanitize_terminal_output, strip_sentinels, substitute_sentinels
-from ._preflight import preflight_check
+from ._providers import resolve_agents, validate_agents, AgentConfig
 from ._scanner import scan_project
 from ._diff import scan_diff
-from ._runners import run_claude, run_codex
+from ._runners import run_agent, run_claude, run_codex
 from ._history import build_history_summary
 from ._prompts import build_round_prompts
 from ._web_context import build_web_context, get_web_search_instruction
 from ._interactive import get_user_input
 from ._log import save_log
+from ._analysis import classify_conflicts, detect_dissenting_opinions, build_conflict_summary, build_agreement_matrix
 
 
 def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                    timeout: int = 120, interactive: bool = True, output_file: Optional[str] = None,
                    dry_run: bool = False, diff_target: Optional[str] = None,
-                   verbose: bool = False):
+                   verbose: bool = False, agent_specs: Optional[List[str]] = None,
+                   quick: bool = False):
     """Run the full multi-agent roundtable discussion."""
     Colors._resolve()
 
@@ -44,6 +46,10 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
         interactive = False
 
     print_banner()
+
+    # Resolve agent configuration
+    agents = resolve_agents(agent_specs)
+    agent_names = [a.name for a in agents]
 
     # Scan project first (diff mode can exit early without needing CLI tools)
     if diff_target is not None:
@@ -59,9 +65,18 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
         print(f"{Colors.DIM}Found project files. Starting discussion...{Colors.RESET}")
 
     # Preflight: verify CLI tools are available (skip in dry-run mode)
-    config = None
     if not dry_run:
-        config = preflight_check()
+        agents = validate_agents(agents)
+
+    # Build agent lookup by key
+    agent_map = {}
+    for a in agents:
+        agent_map[a.name.lower().replace("/", "_").replace(" ", "_")] = a
+
+    agent_display = ", ".join(a.name for a in agents)
+    print(f"{Colors.DIM}Agents: {agent_display}{Colors.RESET}")
+    if quick:
+        print(f"{Colors.DIM}Quick mode: 2 rounds, non-interactive{Colors.RESET}")
 
     print_separator()
 
@@ -73,9 +88,10 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     max_response = MAX_RESPONSE_CHARS if verbose else COMPACT_MAX_RESPONSE_CHARS
     max_history = MAX_HISTORY_CHARS if verbose else COMPACT_MAX_HISTORY_CHARS
 
-    # Build prompts (web context is baked into each round's prompt)
+    # Build prompts with agent names
     rounds = build_round_prompts(project_summary, focus, num_rounds,
-                                 web_context=web_context, verbose=verbose)
+                                 web_context=web_context, verbose=verbose,
+                                 agent_names=agent_names)
 
     # Resolve output file path early so interrupt handler can use it.
     # Fall back to a temp directory if the project directory is not writable.
@@ -102,7 +118,10 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     log.append(f"**Project:** {project_path}")
     log.append(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     log.append(f"**Focus:** {focus}")
+    log.append(f"**Agents:** {agent_display}")
     log.append(f"**Rounds:** {len(rounds)}")
+    if quick:
+        log.append(f"**Mode:** Quick")
     log.append("")
 
     previous_response = ""
@@ -130,10 +149,20 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     try:
         for i, round_info in enumerate(rounds):
             _exit_on_sigterm()
-            agent = round_info.agent
+            agent_key = round_info.agent
             label = round_info.label
-            agent_name = "Claude" if agent == "claude" else "Codex"
-            color = Colors.CLAUDE if agent == "claude" else Colors.CODEX
+
+            # Look up agent config
+            agent_cfg = agent_map.get(agent_key)
+            if agent_cfg is None:
+                # Fallback: try to match by name prefix
+                for cfg in agents:
+                    if cfg.agent_key == agent_key or cfg.name.lower().startswith(agent_key):
+                        agent_cfg = cfg
+                        break
+
+            agent_name = agent_cfg.name if agent_cfg else agent_key.capitalize()
+            color = (agent_cfg.color_code if agent_cfg else Colors.DIM) or Colors.DIM
 
             print(f"\n{Colors.HEADER}{'=' * 64}")
             print(f"  {label}")
@@ -157,7 +186,7 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
                 prompt = round_info.prompt
 
             # Prepend agent-specific web search instruction
-            search_instruction = get_web_search_instruction(agent)
+            search_instruction = get_web_search_instruction(agent_key)
             prompt = search_instruction + "\n\n" + prompt
 
             # Enforce global prompt budget
@@ -204,12 +233,13 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
             round_start = time.monotonic()
 
             def _call_agent(t):
-                if agent == "claude":
-                    return run_claude(prompt, project_path, t,
-                                      cmd_path=config.claude_cmd if config else None)
+                if agent_cfg:
+                    return run_agent(prompt, project_path, t, agent_config=agent_cfg)
+                # Legacy fallback for default agents without config
+                if agent_key == "claude":
+                    return run_claude(prompt, project_path, t)
                 else:
-                    return run_codex(prompt, project_path, t,
-                                     cmd_path=config.codex_cmd if config else None)
+                    return run_codex(prompt, project_path, t)
 
             result = _call_agent(timeout)
 
@@ -268,6 +298,22 @@ def run_roundtable(project_path: str, focus: str = "all", num_rounds: int = 4,
     finally:
         if _prev_sigterm is not None:
             signal.signal(signal.SIGTERM, _prev_sigterm)
+
+    # Post-discussion analysis: conflict classification & agreement matrix
+    if conversation_history and not dry_run:
+        conflicts = classify_conflicts(conversation_history)
+        dissents = detect_dissenting_opinions(conversation_history)
+        conflict_summary = build_conflict_summary(conflicts, dissents)
+        agreement_matrix = build_agreement_matrix(conversation_history)
+
+        if conflict_summary:
+            log.append(conflict_summary)
+            print(f"\n{Colors.HEADER}--- Conflict Analysis ---{Colors.RESET}")
+            print(conflict_summary)
+
+        if agreement_matrix:
+            log.append(agreement_matrix)
+            print(agreement_matrix)
 
     # Save full discussion log
     log_content = save_log(log, output_file, project_path)
