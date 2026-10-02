@@ -18,3 +18,14 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Cloud development local artifacts
+.venv/
+node_modules/
+__pycache__/
+.dart_tool/
+.wrangler/
+.cloud-artifacts/
+.env
+.env.*
+!.env.example
