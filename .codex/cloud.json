@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "AI Roundtable",
+  "container": ".devcontainer/devcontainer.json",
+  "runtime": "python",
+  "install": "bash .codex/setup.sh",
+  "check": "bash .codex/check.sh",
+  "start": null,
+  "test_scope": "Existing unittest suite; provider CLIs are mocked.",
+  "limitations": [
+    "Live multi-agent reviews require separately installed/authenticated provider CLIs."
+  ],
+  "required_network_domains": [
+    "pypi.org",
+    "files.pythonhosted.org"
+  ]
+}

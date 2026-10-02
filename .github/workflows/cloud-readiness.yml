@@ -1,0 +1,21 @@
+name: Cloud development checks
+on:
+  pull_request:
+  push:
+    branches: [main, master, dev]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cloud:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Build development image
+        run: docker build -f .devcontainer/Dockerfile -t cloud-dev .
+      - name: Install and check in Linux container
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp/cloud-home \
+            --mount type=bind,source="$PWD",target=/workspace cloud-dev \
+            bash -c 'set -euo pipefail; mkdir -p "$HOME"; bash .codex/setup.sh; bash .codex/check.sh'
